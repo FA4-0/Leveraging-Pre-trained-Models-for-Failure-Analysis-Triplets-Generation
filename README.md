@@ -16,3 +16,20 @@ BERT, BART and GPT3 by a large margin on ROUGE. Furthermore, we introduce LEvens
 Sequential Evaluation metric (LESE) for better evaluation of the structured FAT data and
 show that it compares exactly with human judgment than existing metrics.
 ```
+
+------------------------------
+
+### Cite
+
+```
+@misc{https://doi.org/10.48550/arxiv.2210.17497,
+  doi = {10.48550/ARXIV.2210.17497},
+  url = {https://arxiv.org/abs/2210.17497},
+  author = {Ezukwoke, Kenneth and Hoayek, Anis and Batton-Hubert, Mireille and Boucher, Xavier and Gounet, Pascal and Adrian, Jerome},
+  keywords = {Computation and Language (cs.CL), Machine Learning (cs.LG), Applications (stat.AP), FOS: Computer and information sciences, FOS: Computer and information sciences, G.3; I.2; I.7, 68Txx, 68Uxx},
+  title = {Leveraging Pre-trained Models for Failure Analysis Triplets Generation},
+  publisher = {arXiv},
+  year = {2022},
+  copyright = {Creative Commons Attribution 4.0 International}
+}
+```
