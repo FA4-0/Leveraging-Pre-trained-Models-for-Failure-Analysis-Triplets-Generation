@@ -207,11 +207,11 @@ class LESE:
                 pass
         
         self.D = np.zeros((n_a + 1, n_b + 1))
-        # Initialising first row using the length of string a:
+        # Initialising first row using the length of string/list a:
         for i in range(n_a + 1):
             self.D[i][0] = i
         
-        # Initialising first column using the length of string b:
+        # Initialising first column using the length of string/list b:
         for j in range(n_b + 1):
             self.D[0][j] = j
         
