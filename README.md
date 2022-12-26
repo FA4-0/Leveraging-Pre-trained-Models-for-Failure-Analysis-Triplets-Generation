@@ -21,8 +21,8 @@ show that it compares exactly with human judgment than existing metrics.
 
 ### How to use
 
-> - `git clone https://github.com/AI-for-Fault-Analysis-FA4-0/Leveraging-Pre-trained-Models-for-Failure-Analysis-Triplets-Generation`: clone repository
-> - ...
+ - `git clone https://github.com/AI-for-Fault-Analysis-FA4-0/Leveraging-Pre-trained-Models-for-Failure-Analysis-Triplets-Generation`: clone repository
+ - ...
 
 ------------------------------
 
