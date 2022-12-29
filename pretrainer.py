@@ -79,7 +79,6 @@ path = os.getcwd()
 
 #%% Preprocessing...
 
-
 class Mergefeatures(object):
     def __init__(self, string):
         super(Mergefeatures, self).__init__()
@@ -91,7 +90,6 @@ class Mergefeatures(object):
         '''
         z = ','.join(y.strip('[]') for y in self.string)
         z = [x.strip().strip("''") for x in z.split(',')]
-        #return ' '.join(x for x in z if not x == 'nan')
         z = ' '.join(x for x in z if not x == 'nan' if not x == ' ' if not x == '')
         z = [x for x in z.split(' ')]
         return z
@@ -162,22 +160,21 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
                              attention_mask = inputs['attention_mask'],
                              labels = inputs['labels']
                              )
-            tmp_eval_loss = outputs['loss']
+            if args.use_weights:
+                tmp_eval_loss = batch[2] * outputs['loss']
+            else:
+                tmp_eval_loss = outputs['loss']
             avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
             avg_templ_ppl = np.exp(avg_tmp_eval_loss) #average batch perplexity
             eval_loss += avg_tmp_eval_loss #total inreamental loss
             perplexity += avg_templ_ppl #
-            # avg_eval_loss.append(avg_tmp_eval_loss)
-            # ppl.append(avg_templ_ppl)
         nb_eval_steps += 1
     
-    eval_loss = eval_loss / nb_eval_steps
-    # np.save(join(eval_output_dir, f'avg_evaluation_loss_{eval_loss}.npy'), avg_eval_loss)
-    # np.save(join(eval_output_dir, f'avg_ppl_{perplexity}.npy'), ppl)
+    eval_loss /= nb_eval_steps
+    perplexity /= nb_eval_steps
     output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
     with open(output_eval_file, "w") as writer:
         logger.info("   ***** Eval results *****")
-        logger.info(f"  Evaluation loss: {eval_loss} PPL: {perplexity}")
         writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}")
     return eval_loss, perplexity
 
@@ -234,7 +231,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
         t_total = len(train_dataloader) // args.gradient_accumulation_steps * args.num_train_epochs
         
     # Prepare optimizer and schedule (linear warmup and decay)
-    no_decay = ['bias', 'LayerNorm.weight']
+    no_decay = ["bias", "LayerNorm.bias", "LayerNorm.weight"]
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
@@ -293,6 +290,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             global_step = 0
             logger.info("  Start fine-tuning...")
 
+    avg_tr_loss, avg_eval_loss, avg_ppl = [], [], []
     tr_loss, logging_loss = 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(epochs_trained, int(args.num_train_epochs), desc = "Epoch", disable = args.local_rank not in [-1, 0])
@@ -320,9 +318,11 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                              attention_mask = inputs['attention_mask'],
                              labels = inputs['labels']
                              )
-            
-            loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
-
+            if args.use_weights:
+                loss = batch[2] * outputs['loss']
+            else:
+                loss = outputs['loss']
+                
             if args.n_gpu > 1:
                 loss = loss.mean()
             if args.gradient_accumulation_steps > 1:
@@ -348,16 +348,24 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
                 
+        tr_loss_tmp = tr_loss / global_step
+        avg_tr_loss.append(tr_loss_tmp)
         #---model evaluation
         if args.local_rank in [-1, 0]:
             # Log metrics
             if args.local_rank == -1 and args.evaluate_during_training:
                 eval_loss, ppl = evaluate(args, eval_dataset, model, tokenizer) #evaluation here
+                avg_eval_loss.append(eval_loss)
+                avg_ppl.append(avg_ppl)
+                logger.info(f'Train loss: {tr_loss_tmp} Eval loss: {eval_loss} Perplexity: {ppl}')
                 tb_writer.add_scalar(f'Eval loss: {eval_loss} Perplexity: {ppl}', global_step)
             tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
             tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
             logging_loss = tr_loss
-        
+    
+    np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss)
+    np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss)
+    np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl)
     #-----save model
     if args.local_rank in [-1, 0]:
         # Save model checkpoint
@@ -390,12 +398,12 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
 def main():
     #Model config, Model and their respective tokenizers
     MODEL_CLASSES = {
-                    'bert': (BertConfig, BertForMaskedLM, BertTokenizer),
-                    'roberta': (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer),
-                    'distilbert': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer),
-                    'xlnet': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
-                    'xlm': (XLMConfig, XLMWithLMHeadModel, XLMTokenizer),
-                    'transfo-xl': (TransfoXLConfig, TransfoXLLMHeadModel, TransfoXLTokenizer),
+                    'bert-large-uncased': (BertConfig, BertForMaskedLM, BertTokenizer), #masked model I
+                    'roberta-large': (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer), #masked model II
+                    'distilbert-large-uncased': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer), #masked model III
+                    'xlnet-large-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
+                    'xlm-roberta-large': (XLMConfig, XLMWithLMHeadModel, XLMTokenizer),
+                    'transfo-xl-wt103': (TransfoXLConfig, TransfoXLLMHeadModel, TransfoXLTokenizer),
                     'openai-gpt': (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
@@ -425,7 +433,7 @@ def main():
                         default = None,
                         type = str,
                         required = True,
-                        help = "The output directory where the evaluation metrics are stored.")
+                        help = "The output directory where the evaluation metrics and losses are stored.")
     ## Other parameters
     parser.add_argument("--config_name",
                         default = "",
@@ -464,6 +472,9 @@ def main():
                         action='store_true',
                         help="Whether to run training.")
     parser.add_argument("--do_eval",
+                        action='store_true',
+                        help="Whether to run eval on the dev set.")
+    parser.add_argument("--use_weights",
                         action='store_true',
                         help="Whether to run eval on the dev set.")
     parser.add_argument("--evaluate_during_training",
@@ -546,9 +557,13 @@ def main():
                         default = -1,
                         help = "For distributed training: local_rank is 0 and -1 for unit gpu")
     args = parser.parse_args()
-    
-    args.output_dir = join(args.model_name_or_path, args.output_dir)
-    args.eval_dir = join(args.model_name_or_path, args.eval_dir)
+    #-----------------set root directories
+    if args.use_weights:
+        absolute_dir = f'plm/use_weight/{args.year}'
+    else:
+        absolute_dir = f'plm/finetuning/{args.year}'
+    args.output_dir = join(join(absolute_dir, args.model_name_or_path), args.output_dir)
+    args.eval_dir = join(join(absolute_dir, args.model_name_or_path), args.eval_dir)
     #--------------------------------- main
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
@@ -624,14 +639,22 @@ def main():
     df_df = pd.read_csv(TRAIN_DATA_FILE, sep = ',')['text']
     max_length = max([len(tokenizer.encode(fa)) for fa in df_df])
     
-    dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length)
+    #-- Probabilistic weights
+    z_size = 2
+    gcvaemodel = 'mah'
+    pl = np.load(join(path, f'b/gcvae/fagcvaegmm_st_sst/latent_{z_size}/500/{gcvaemodel}/gmm_proba_st_sst.npy')) #local
+    pl = np.max(pl, 1) #returns maximum along horizontal axis...
+    if args.use_weights:
+        dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length, wts = pl, use_weights = args.use_weights)
+    else:
+        dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length)
     train_size = int(0.7 * len(dataset)) #split data into 70/30 train-test proportion
     train_dataset, eval_dataset = random_split(dataset, [train_size, len(dataset) - train_size]) #validationsize = len(dataset) - train_size
     
     # Training
     if args.do_train:
         global_step, tr_loss = train(args, train_dataset, eval_dataset, model, tokenizer)
-        logger.info(f" global_step = {global_step}, average loss = {tr_loss}")
+        logger.info(f" Global step = {global_step}, Average loss = {tr_loss}")
 
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
@@ -703,8 +726,8 @@ def main():
     lev_d_1, prec_lev_1, rec_lev_1, fs_lev_1 = [], [], [], []
     lev_d, prec_lev, rec_lev, fs_lev = [], [], [], []
     for ii, ij in zip(predictor_corpus, target):
-        logger.info(f'  --> Failure description: {ii}\n')
-        logger.info(f'  Expert FA: {ij}\n')
+        logger.info(f'Failure description: {ii}\n')
+        logger.info(f'Expert FA: {ij}\n')
         start_prompt = ii
         # start_prompt = 'data castelletto customer manufacturing limit axis analysis failure complaint failed thd abnormal'
         start_tokens = tokenizer(start_prompt, return_tensors="pt").input_ids.to(device)
@@ -713,14 +736,14 @@ def main():
                                                          )
         generated_text_is = []
         for _, s_output in enumerate(sampled_generated_outputs_token):
-            logger.info(f"A  I generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
+            logger.info(f"AI generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
             generated_text_is.append(tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
         prediction = " ".join(generated_text_is)
         model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
         #bleu score
         chencherry = SmoothingFunction()
-        bluescore.append(sentence_bleu([ij.split(' ')], prediction.split(' '), weights=(1, 0, 0, 0), smoothing_function = chencherry.method2))
-        bluescore_3.append(sentence_bleu([ij.split(' ')], prediction.split(' '), weights=(0.33, 0.33, 0.33, 0), smoothing_function = chencherry.method2))
+        bluescore.append(sentence_bleu([ij.split(' ')], prediction.split(' '), weights = (1, 0, 0, 0), smoothing_function = chencherry.method2))
+        bluescore_3.append(sentence_bleu([ij.split(' ')], prediction.split(' '), weights = (0.33, 0.33, 0.33, 0), smoothing_function = chencherry.method2))
         #meteor scores
         meteor_score_s.append(nltk.translate.meteor_score.meteor_score([ij.split(' ')], prediction.split(' ')))
         #lese score
@@ -747,13 +770,13 @@ def main():
     logger.info('  *********************************Done computing self-BELU score**********************************************')
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_lese1_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores_1)
     logger.info(f'  LESE Precision: {np.mean(prec_lev_1)}\nLESE Recall: {np.mean(rec_lev_1)}\nLESE F1-score: {np.mean(fs_lev_1)}')
-    logger.info('****************************************Done computing LESE score**********************************************')
+    logger.info('   ****************************************Done computing LESE score**********************************************')
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_lese3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores)
     logger.info(f'  LESE Precision: {np.mean(prec_lev)}\nLESE Recall: {np.mean(rec_lev)}\nLESE F1-score: {np.mean(fs_lev)}')
-    logger.info('*************************************Done computing LESE score***********************************************')
+    logger.info('   *************************************Done computing LESE score***********************************************')
     #------------------ Remove empty hypothesis before computing ROUGE and METEOR scores -------------------------
     hyps_and_refs = zip(model_generated_fas, target)
-    hyps_and_refs = [ x for x in hyps_and_refs if len(x[0]) > 0]
+    hyps_and_refs = [x for x in hyps_and_refs if len(x[0]) > 0]
     model_generated_fas, target = zip(*hyps_and_refs)
     #-------------------------------------------------------------------------------------------------------------
     rouge = Rouge()
