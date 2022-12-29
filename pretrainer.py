@@ -147,11 +147,10 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
     logger.info("   ***** Running evaluation {} *****".format(prefix))
     logger.info(f"  Num examples = {len(eval_dataset)}")
     logger.info(f"  Batch size = {args.eval_batch_size}")
-    # avg_eval_loss, ppl = [], []
     eval_loss, perplexity = 0.0, 0.0
     nb_eval_steps = 0
+    model.eval()
     for batch in tqdm(eval_dataloader, desc = "Evaluating"):
-        model.eval()
         batch = tuple(t.to(args.device) for t in batch)
         #No optimization during evaluation. i.e mini-batch gradient descent not needed.
         with torch.no_grad():
@@ -159,8 +158,11 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
                       'labels':         batch[0],
                       'attention_mask': batch[1],
                       }
-            outputs = model(**inputs)
-            tmp_eval_loss = outputs['loss'] #evaluation loss and logit
+            outputs  = model(inputs['input_ids'], 
+                             attention_mask = inputs['attention_mask'],
+                             labels = inputs['labels']
+                             )
+            tmp_eval_loss = outputs['loss']
             avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
             avg_templ_ppl = np.exp(avg_tmp_eval_loss) #average batch perplexity
             eval_loss += avg_tmp_eval_loss #total inreamental loss
@@ -314,7 +316,11 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             #revisit if the result is unsatisfactory
             # if args.model_type != 'distilbert':
             #     inputs['token_type_ids'] = None if args.model_type == 'xlm' else batch[3]
-            outputs = model(**inputs)
+            outputs  = model(inputs['input_ids'], 
+                             attention_mask = inputs['attention_mask'],
+                             labels = inputs['labels']
+                             )
+            
             loss = outputs['loss']  # model outputs are always tuple in transformers (see doc)
 
             if args.n_gpu > 1:
@@ -342,37 +348,37 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                 model.zero_grad()
                 global_step += 1
                 
-                #---model evaluation
-                if args.local_rank in [-1, 0] and args.logging_steps > 0 and global_step % args.logging_steps == 0:
-                    # Log metrics
-                    if args.local_rank == -1 and args.evaluate_during_training:
-                        eval_loss, ppl = evaluate(args, eval_dataset, model, tokenizer) #evaluation here
-                        tb_writer.add_scalar(f'Eval loss: {eval_loss} Perplexity: {ppl}', global_step)
-                    tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
-                    tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
-                    logging_loss = tr_loss
+        #---model evaluation
+        if args.local_rank in [-1, 0]:
+            # Log metrics
+            if args.local_rank == -1 and args.evaluate_during_training:
+                eval_loss, ppl = evaluate(args, eval_dataset, model, tokenizer) #evaluation here
+                tb_writer.add_scalar(f'Eval loss: {eval_loss} Perplexity: {ppl}', global_step)
+            tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
+            tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
+            logging_loss = tr_loss
         
-                #-----save model
-                if args.local_rank in [-1, 0] and args.save_steps > 0 and global_step % args.save_steps == 0:
-                    # Save model checkpoint
-                    output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
-                    if not os.path.exists(output_dir):
-                        os.makedirs(output_dir)
-                    model_to_save = model.module if hasattr(model, 'module') else model
-                    model_to_save.save_pretrained(output_dir)
-                    tokenizer.save_pretrained(output_dir)
-        
-                    torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-                    logger.info(f"  Saving model checkpoint to {output_dir}")
-        
-                    _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint')
-                    torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-                    torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-                    logger.info("  Saving optimizer and scheduler states to {output_dir}")
+    #-----save model
+    if args.local_rank in [-1, 0]:
+        # Save model checkpoint
+        output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        model_to_save = model.module if hasattr(model, 'module') else model
+        model_to_save.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
 
-        if args.max_steps > 0 and global_step > args.max_steps:
-            epoch_iterator.close()
-            break
+        torch.save(args, os.path.join(output_dir, 'training_args.bin'))
+        logger.info(f"  Saving model checkpoint to {output_dir}")
+
+        _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint')
+        torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+        torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+        logger.info("  Saving optimizer and scheduler states to {output_dir}")
+
+        # if args.max_steps > 0 and global_step > args.max_steps:
+        #     epoch_iterator.close()
+        #     break
     if args.local_rank in [-1, 0]:
         tb_writer.close()
 
@@ -589,7 +595,7 @@ def main():
 
     model.to(args.device)
 
-    logger.info(f"  Training/evaluation parameters {args}")
+    logger.info(f"  Training/evaluation parameters: {args}")
 
     # Dataset
     class FailureAnalysisDataset(Dataset):
@@ -660,7 +666,7 @@ def main():
                 model = model_class.from_pretrained(checkpoint)
                 model.to(args.device)
                 eval_loss, ppl = evaluate(args, model, tokenizer, prefix=global_step)
-                logger.info("  Evaluation loss: [eval_loss} PPL: {ppl}")
+                logger.info(f"  Evaluation loss: {eval_loss} PPL: {ppl}")
 
     #---- Generation evaluation
     x_nns = ['REFERENCE',
