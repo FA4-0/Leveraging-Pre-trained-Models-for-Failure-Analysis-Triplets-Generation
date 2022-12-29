@@ -1,11 +1,11 @@
 #!/bin/bash -l
-#SBATCH --job-name=gpt2_pt100
+#SBATCH --job-name=...
 #SBATCH --mail-user=...
-#SBATCH --mail-type=ALL
-#SBATCH --gres=gpu:1
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --mail-type=...
+#SBATCH --gres=...
+#SBATCH --nodes=...
+#SBATCH --ntasks=...
+#SBATCH --cpus-per-task=...
 #SBATCH --mem=...
 #SBATCH --time=7-00:00:00
 #SBATCH --partition=...
@@ -25,7 +25,7 @@ echo SLURM_TASKS_PER_NODE: $SLURM_TASKS_PER_NODE
 echo SLURM_NTASKS_PER_NODE: $SLURM_NTASKS_PER_NODE
 echo -----------------------------------------------
 echo Run program...
-source ~/aaa-env/env.sh
+source ~/meso-env/env.sh
 python pretrainer.py \
         --model_type gpt2 \
         --model_name_or_path gpt2 \
@@ -34,7 +34,7 @@ python pretrainer.py \
         --max_seq_length 128 \
         --per_gpu_train_batch_size 1 \
         --learning_rate 5e-5 \
-        --num_train_epochs 3.0 \
+        --num_train_epochs 5.0 \
         --output_dir result/ \
         --eval_dir evaluation/ \
         --overwrite_output_dir \
@@ -51,5 +51,5 @@ python pretrainer.py \
         --adam_epsilon 1e-8 \
         --weight_decay 0.05 \
         --max_grad_norm 1.0 \
-        --max_steps 100
+        --max_steps -1
 echo -----------------------------------------------
