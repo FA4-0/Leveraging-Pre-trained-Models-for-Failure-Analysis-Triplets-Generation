@@ -54,7 +54,7 @@ from transformers import (WEIGHTS_NAME, CONFIG_NAME,
                             XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
                             TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
                             OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
-                            CTRLTokenizer, CTRLLMHeadModel, CTRLConfig, #CTRL Model
+                            BartTokenizer, BartForCausalLM, BartConfig,
                             )
 from transformers import AdamW, get_linear_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader, random_split, RandomSampler, SequentialSampler, DistributedSampler
@@ -152,18 +152,34 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
         batch = tuple(t.to(args.device) for t in batch)
         #No optimization during evaluation. i.e mini-batch gradient descent not needed.
         with torch.no_grad():
-            inputs = {'input_ids':      batch[0],
+            inputs = {
+                      'input_ids':      batch[0],
                       'labels':         batch[0],
                       'attention_mask': batch[1],
                       }
-            outputs  = model(inputs['input_ids'], 
-                             attention_mask = inputs['attention_mask'],
-                             labels = inputs['labels']
-                             )
+            #----- using token-type_ids where necessary
+            if args.model_type != 'distilbert-large-uncased' and args.model_type != 'facebook/bart-large-cnn':
+                if not args.use_weights:
+                    inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[2]
+                else:
+                    inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
+            
+            if args.model_type != 'distilbert-base-uncased' and args.model_type != 'facebook/bart-large-cnn':
+                outputs  = model(inputs['input_ids'], 
+                                 attention_mask = inputs['attention_mask'],
+                                 labels = inputs['labels'],
+                                 token_type_ids = inputs['token_type_ids']
+                                 )
+            else: #for distilbert
+                outputs  = model(inputs['input_ids'], 
+                                 attention_mask = inputs['attention_mask'],
+                                 labels = inputs['labels'],
+                                 )
             if args.use_weights:
                 tmp_eval_loss = batch[2] * outputs['loss']
             else:
                 tmp_eval_loss = outputs['loss']
+                    
             avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
             avg_templ_ppl = np.exp(avg_tmp_eval_loss) #average batch perplexity
             eval_loss += avg_tmp_eval_loss #total inreamental loss
@@ -173,9 +189,15 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
     eval_loss /= nb_eval_steps
     perplexity /= nb_eval_steps
     output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
-    with open(output_eval_file, "w") as writer:
-        logger.info("   ***** Eval results *****")
-        writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}")
+    if not os.path.exists(output_eval_file):
+        with open(output_eval_file, "w+") as writer:
+            logger.info("   ***** Eval results *****")
+            writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}")
+    else:
+        with open(output_eval_file, "a+") as writer:
+            writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}")
+    writer.close()
+    
     return eval_loss, perplexity
 
 
@@ -311,18 +333,30 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                       'labels':         batch[0],
                       'attention_mask': batch[1],
                       }
-            #revisit if the result is unsatisfactory
-            # if args.model_type != 'distilbert':
-            #     inputs['token_type_ids'] = None if args.model_type == 'xlm' else batch[3]
-            outputs  = model(inputs['input_ids'], 
-                             attention_mask = inputs['attention_mask'],
-                             labels = inputs['labels']
-                             )
+            #----- adding token-type_ids where necessary
+            if args.model_type != 'distilbert-base-uncased' and args.model_type != 'facebook/bart-large-cnn':
+                if not args.use_weights:
+                    inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[2]
+                else:
+                    inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
+                    
+            if args.model_type != 'distilbert-base-uncased' and args.model_type != 'facebook/bart-large-cnn':
+                outputs  = model(inputs['input_ids'], 
+                                 attention_mask = inputs['attention_mask'],
+                                 labels = inputs['labels'],
+                                 token_type_ids = inputs['token_type_ids']
+                                 )
+            else: #for distilbert
+                outputs  = model(inputs['input_ids'], 
+                                 attention_mask = inputs['attention_mask'],
+                                 labels = inputs['labels'],
+                                 )
             if args.use_weights:
                 loss = batch[2] * outputs['loss']
             else:
                 loss = outputs['loss']
-                
+
+                    
             if args.n_gpu > 1:
                 loss = loss.mean()
             if args.gradient_accumulation_steps > 1:
@@ -356,7 +390,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             if args.local_rank == -1 and args.evaluate_during_training:
                 eval_loss, ppl = evaluate(args, eval_dataset, model, tokenizer) #evaluation here
                 avg_eval_loss.append(eval_loss)
-                avg_ppl.append(avg_ppl)
+                avg_ppl.append(ppl)
                 logger.info(f'Train loss: {tr_loss_tmp} Eval loss: {eval_loss} Perplexity: {ppl}')
                 tb_writer.add_scalar(f'Eval loss: {eval_loss} Perplexity: {ppl}', global_step)
             tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
@@ -398,17 +432,15 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
 def main():
     #Model config, Model and their respective tokenizers
     MODEL_CLASSES = {
-                    'bert-large-uncased': (BertConfig, BertForMaskedLM, BertTokenizer), #masked model I
+                    'facebook/bart-large-cnn': (BartConfig, BartForCausalLM, BartTokenizer),
+                    'bert-base-uncased': (BertConfig, BertForMaskedLM, BertTokenizer), #masked model I
                     'roberta-large': (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer), #masked model II
-                    'distilbert-large-uncased': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer), #masked model III
+                    'distilbert-base-uncased': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer), #masked model III
                     'xlnet-large-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
-                    'xlm-roberta-large': (XLMConfig, XLMWithLMHeadModel, XLMTokenizer),
-                    'transfo-xl-wt103': (TransfoXLConfig, TransfoXLLMHeadModel, TransfoXLTokenizer),
                     'openai-gpt': (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-large': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
-                    'ctrl': (CTRLConfig, CTRLLMHeadModel, CTRLTokenizer),
                     }
     
     parser = argparse.ArgumentParser()
@@ -483,6 +515,9 @@ def main():
     parser.add_argument("--do_lower_case",
                         action = 'store_true',
                         help = "Set this flag if you are using an uncased model.")
+    parser.add_argument("--return_token_type_ids",
+                        action = 'store_true',
+                        help = "Return return_token_type_ids...useful for some models.")
     parser.add_argument("--per_gpu_train_batch_size",
                         default = 1,
                         type = int,
@@ -598,9 +633,10 @@ def main():
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,) #Config class
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
-                                                bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token) #Tokenization
+                                                bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
     model = model_class.from_pretrained(args.model_name_or_path, from_tf = bool('.ckpt' in args.model_name_or_path), config = config) #LM class
     embedding_size = model.get_input_embeddings().weight.shape[0]
+    #----
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
     logging.info(f'  Embedding size: {embedding_size}')
@@ -620,20 +656,22 @@ def main():
             self.labels = []
             self.wts = wts       #weights GCVAE+GMM...Fixing failure analysis yearly imbalance in dataset
             self.use_weights = use_weights     #probabilistic weights from GCVAE + GMM
+            self.token_type_ids = []
             for txt in txt_list:
                 encodings_dict = tokenizer(args.bos_token + txt + args.eos_token, truncation = True,
-                                            max_length = max_length, padding = "max_length")
+                                            max_length = max_length, padding = "max_length", 
+                                            return_token_type_ids = args.return_token_type_ids )
                 self.input_ids.append(torch.tensor(encodings_dict['input_ids']))
                 self.attn_masks.append(torch.tensor(encodings_dict['attention_mask']))
-    
+                self.token_type_ids.append(torch.tensor(encodings_dict['token_type_ids']))
         def __len__(self):
             return len(self.input_ids)
     
         def __getitem__(self, idx):
             if not self.use_weights:
-                return self.input_ids[idx], self.attn_masks[idx]
+                return self.input_ids[idx], self.attn_masks[idx], self.token_type_ids[idx]
             else:
-                return self.input_ids[idx], self.attn_masks[idx], self.wts[idx]
+                return self.input_ids[idx], self.attn_masks[idx], self.wts[idx], self.token_type_ids[idx]
     
     TRAIN_DATA_FILE = join(path, f'combine_corpus_{args.year}.csv')
     df_df = pd.read_csv(TRAIN_DATA_FILE, sep = ',')['text']
@@ -774,7 +812,7 @@ def main():
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_lese3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores)
     logger.info(f'  LESE Precision: {np.mean(prec_lev)}\nLESE Recall: {np.mean(rec_lev)}\nLESE F1-score: {np.mean(fs_lev)}')
     logger.info('   *************************************Done computing LESE score***********************************************')
-    #------------------ Remove empty hypothesis before computing ROUGE and METEOR scores -------------------------
+    #------------------ Remove empty/null hypothesis before computing ROUGE and METEOR scores -------------------------
     hyps_and_refs = zip(model_generated_fas, target)
     hyps_and_refs = [x for x in hyps_and_refs if len(x[0]) > 0]
     model_generated_fas, target = zip(*hyps_and_refs)
@@ -787,8 +825,21 @@ def main():
     logger.info(f"  Average metoer score: {np.mean(meteor_score_s)}")
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
     logger.info('  **************************************Done computing METEOR score**************************************')
-
-
+    #--- save complete evaluation results in seperate file
+    output_eval_file = os.path.join(args.eval_dir, "eval_metric_results.txt")
+    with open(output_eval_file, "w+") as writer:
+        logger.info("   ***** Storing complete evaluation results *****")
+        writer.write("   ***** Complete eval results *****")
+        writer.write(f"Average blue score: {np.mean(bluescore)}")
+        writer.write(f"Average blue-3 score: {np.mean(bluescore_3)}")
+        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}')
+        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}')
+        for i, j in rouge_score.items():
+            writer.write(f'{i}: {j}')
+        writer.write(f"Average metoer score: {np.mean(meteor_score_s)}")
+    writer.close()
+    
+    
 if __name__ == "__main__":
     main()
     
