@@ -53,6 +53,16 @@ show that it compares exactly with human judgment than existing metrics.
         #--use_weights \
         --max_steps -1
         ```
+- Model type/name with MaskedLM or LMHead
+  - ```facebook/bart-large-cnn```: Bidirectional Auto-Regressive Transformer
+  - ```bert-base-uncased```: Bidirectional Encoder Representations from Transformers
+  - ```roberta-large```: Robustly Optimized BERT Pretraining Approach
+  - ```distilbert-base-uncased```: A distilled version of BERT: smaller, faster, cheaper and lighter
+  - ```xlnet-large-cased```: Generalized Autoregressive Pretraining for Language Understanding
+  - ```openai-gpt```: Generative Pre-trained Transformer 3
+  - ```gpt2```: Generative Pre-trained Transformer 2 (base)
+  - ```gpt2-medium```: Generative Pre-trained Transformer 2 (Medium)
+  - ```gpt2-large```: Generative Pre-trained Transformer 2 (Large)
 
 ------------------------------
 
