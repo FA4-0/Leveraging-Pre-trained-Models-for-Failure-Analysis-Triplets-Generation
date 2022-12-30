@@ -25,8 +25,8 @@ show that it compares exactly with human judgment than existing metrics.
  - Runing training and evaluation example
  - ```python
         python pretrainer.py \
-        --model_type xlm-mlm-en-2048 \
-        --model_name_or_path xlm-mlm-en-2048 \
+        --model_type gpt2 \
+        --model_name_or_path gpt2 \
         --do_train \
         --do_eval \
         --max_seq_length 128 \
