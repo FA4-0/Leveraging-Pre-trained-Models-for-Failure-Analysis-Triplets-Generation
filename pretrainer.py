@@ -47,14 +47,14 @@ from pytorchtools import EarlyStopping
 from torch.utils.data import Dataset, random_split
 from transformers import (WEIGHTS_NAME, CONFIG_NAME,
                             GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, #GPT Model
-                            BertTokenizer, BertForMaskedLM, BertConfig, #Bert Model
-                            RobertaTokenizer, RobertaForMaskedLM, RobertaConfig, #Roberta Molde
-                            DistilBertTokenizer, DistilBertForMaskedLM, DistilBertConfig, #DistilBert Model
+                            BertTokenizer, BertLMHeadModel, BertConfig, #Bert Model
+                            RobertaTokenizer, RobertaForCausalLM, RobertaConfig, #Roberta Model
                             XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
                             XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
                             TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
                             OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
                             BartTokenizer, BartForCausalLM, BartConfig,
+                            T5Tokenizer, T5ForConditionalGeneration, T5Config,
                             )
 from transformers import AdamW, get_linear_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader, random_split, RandomSampler, SequentialSampler, DistributedSampler
@@ -73,7 +73,6 @@ import argparse
 logging.basicConfig(format="", level=logging.INFO)
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
-
 #--
 path = os.getcwd()
 
@@ -158,19 +157,21 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
                       'attention_mask': batch[1],
                       }
             #----- using token-type_ids where necessary
-            if args.model_type != 'distilbert-large-uncased' and args.model_type != 'facebook/bart-large-cnn':
+            causal_languages = ['distilbert-base-uncased', 'facebook/bart-large-cnn', 
+                               'roberta-large', 'distilbert-base-uncased']
+            if not args.model_type in causal_languages:
                 if not args.use_weights:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[2]
                 else:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
-            
-            if args.model_type != 'distilbert-base-uncased' and args.model_type != 'facebook/bart-large-cnn':
+                    
+            if not args.model_type in causal_languages:
                 outputs  = model(inputs['input_ids'], 
                                  attention_mask = inputs['attention_mask'],
                                  labels = inputs['labels'],
                                  token_type_ids = inputs['token_type_ids']
                                  )
-            else: #for distilbert
+            else: #for distilbert and 
                 outputs  = model(inputs['input_ids'], 
                                  attention_mask = inputs['attention_mask'],
                                  labels = inputs['labels'],
@@ -334,19 +335,21 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                       'attention_mask': batch[1],
                       }
             #----- adding token-type_ids where necessary
-            if args.model_type != 'distilbert-base-uncased' and args.model_type != 'facebook/bart-large-cnn':
+            causal_languages = ['distilbert-base-uncased', 'facebook/bart-large-cnn', 
+                               'roberta-large', 'distilbert-base-uncased']
+            if not args.model_type in causal_languages:
                 if not args.use_weights:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[2]
                 else:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
                     
-            if args.model_type != 'distilbert-base-uncased' and args.model_type != 'facebook/bart-large-cnn':
+            if not args.model_type in causal_languages:
                 outputs  = model(inputs['input_ids'], 
                                  attention_mask = inputs['attention_mask'],
                                  labels = inputs['labels'],
                                  token_type_ids = inputs['token_type_ids']
                                  )
-            else: #for distilbert
+            else: #for distilbert and 
                 outputs  = model(inputs['input_ids'], 
                                  attention_mask = inputs['attention_mask'],
                                  labels = inputs['labels'],
@@ -433,14 +436,16 @@ def main():
     #Model config, Model and their respective tokenizers
     MODEL_CLASSES = {
                     'facebook/bart-large-cnn': (BartConfig, BartForCausalLM, BartTokenizer),
-                    'bert-base-uncased': (BertConfig, BertForMaskedLM, BertTokenizer), #masked model I
-                    'roberta-large': (RobertaConfig, RobertaForMaskedLM, RobertaTokenizer), #masked model II
-                    'distilbert-base-uncased': (DistilBertConfig, DistilBertForMaskedLM, DistilBertTokenizer), #masked model III
+                    'bert-base-uncased': (BertConfig, BertLMHeadModel, BertTokenizer), #masked model I
+                    'roberta-large': (RobertaConfig, RobertaForCausalLM, RobertaTokenizer), #masked model II
                     'xlnet-large-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
                     'openai-gpt': (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-large': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
+                    # 't5-base': (T5Config, T5ForConditionalGeneration, T5Tokenizer),
+                    # 't5-small': (T5Config, T5ForConditionalGeneration, T5Tokenizer ),
+                    # 't5-large': (T5Config, T5ForConditionalGeneration, T5Tokenizer ),
                     }
     
     parser = argparse.ArgumentParser()
@@ -798,8 +803,8 @@ def main():
         rec_lev.append(lese.recall_)
         fs_lev.append(lese.f_score_)
         logger.info('*'*50)
-    less_scores_1 = {'lev_d': lev_d_1, 'prec_lev': prec_lev_1, 'rec_lev': rec_lev_1, 'fs_lev': fs_lev_1}
-    less_scores = {'lev_d': lev_d, 'prec_lev': prec_lev, 'rec_lev': rec_lev, 'fs_lev': fs_lev}
+    less_scores_1 = {'lev_d': lev_d_1, 'prec_lev': prec_lev_1, 'rec_lev': rec_lev_1, 'fs_lev': fs_lev_1} #LESE-1 ..variable name is lese_scores_1 not *less*
+    less_scores = {'lev_d': lev_d, 'prec_lev': prec_lev, 'rec_lev': rec_lev, 'fs_lev': fs_lev} #LESE-3
     logger.info(f"  Average blue score: {np.mean(bluescore)}")
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_bleuscore_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore)
     logger.info('  *********************************Done computing self-BELU score*********************************')
@@ -832,8 +837,8 @@ def main():
         writer.write("   ***** Complete eval results *****")
         writer.write(f"Average blue score: {np.mean(bluescore)}")
         writer.write(f"Average blue-3 score: {np.mean(bluescore_3)}")
-        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}')
-        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}')
+        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}\nLevenshstein distance: {np.mean(lev_d_1)//1}')
+        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}\nLevenshstein distance: {np.mean(lev_d)//3}')
         for i, j in rouge_score.items():
             writer.write(f'{i}: {j}')
         writer.write(f"Average metoer score: {np.mean(meteor_score_s)}")
