@@ -53,7 +53,7 @@ show that it compares exactly with human judgment than existing metrics.
         #--use_weights \
         --max_steps -1
         ```
-- Model type/name with MaskedLM or LMHead
+- Model type/name with Causal LMHead
   - ```facebook/bart-large-cnn```: Bidirectional Auto-Regressive Transformer
   - ```bert-base-uncased```: Bidirectional Encoder Representations from Transformers
   - ```roberta-large```: Robustly Optimized BERT Pretraining Approach
