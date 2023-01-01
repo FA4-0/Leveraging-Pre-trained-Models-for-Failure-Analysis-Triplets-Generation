@@ -199,11 +199,12 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
     output_eval_file = os.path.join(eval_output_dir, "eval_results.txt")
     if not os.path.exists(output_eval_file):
         with open(output_eval_file, "w+") as writer:
-            logger.info("   ***** Eval results *****")
-            writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}")
+            logger.info("   ***** Eval loss results *****")
+            writer.write("   ***** Eval loss results *****")
+            writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}\n")
     else:
         with open(output_eval_file, "a+") as writer:
-            writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}")
+            writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}\n")
     writer.close()
     
     return eval_loss, perplexity
@@ -452,7 +453,7 @@ def main():
                     'facebook/bart-large-cnn': (BartConfig, BartForConditionalGeneration, BartTokenizer),
                     'bert-base-uncased': (BertConfig, EncoderDecoderModel, BertTokenizer), #Causal model I
                     'roberta-base': (RobertaConfig, EncoderDecoderModel, RobertaTokenizer), #Causal model II
-                    'xlnet-base-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
+                    #'xlnet-base-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
                     'openai-gpt': (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
@@ -799,6 +800,8 @@ def main():
     target = df_xn_lda[lambdas].astype(str).apply(lambda x: Mergefeatures(x).concat(), axis = 1)
     target = target.apply(lambda x: ' '.join(x))
     target = list(target)
+    #---- convert all character to lower case. OPENAI-GPT3 generates in lowercase
+    target = [x.lower() for x in target]
     
     # Generative metric evaluation
     bluescore = []
@@ -820,8 +823,9 @@ def main():
         for _, s_output in enumerate(sampled_generated_outputs_token):
             logger.info(f"AI generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
             generated_text_is.append(tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
-        prediction = " ".join(generated_text_is)
+        prediction = " ".join(generated_text_is).lower()
         model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
+        #--------------------
         #bleu score
         chencherry = SmoothingFunction()
         bluescore.append(sentence_bleu([ij.split(' ')], prediction.split(' '), weights = (1, 0, 0, 0), smoothing_function = chencherry.method2))
@@ -844,7 +848,7 @@ def main():
         logger.info('*'*50)
     less_scores_1 = {'lev_d': lev_d_1, 'prec_lev': prec_lev_1, 'rec_lev': rec_lev_1, 'fs_lev': fs_lev_1} #LESE-1 ..variable name is lese_scores_1 not *less*
     less_scores = {'lev_d': lev_d, 'prec_lev': prec_lev, 'rec_lev': rec_lev, 'fs_lev': fs_lev} #LESE-3
-    logger.info(f"  Average blue score: {np.mean(bluescore)}")
+    logger.info(f"  Average blue-1 score: {np.mean(bluescore)}")
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_bleuscore_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore)
     logger.info('  *********************************Done computing self-BELU score*********************************')
     logger.info(f"  Average blue-3 score: {np.mean(bluescore_3)}")
@@ -874,10 +878,10 @@ def main():
     with open(output_eval_file, "w+") as writer:
         logger.info("   ***** Storing complete evaluation results *****")
         writer.write("   ***** Complete eval results *****\n")
-        writer.write(f"Average blue score: {np.mean(bluescore)}\n")
+        writer.write(f"Average blue-1 score: {np.mean(bluescore)}\n")
         writer.write(f"Average blue-3 score: {np.mean(bluescore_3)}\n")
-        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}\nLevenshstein distance: {np.mean(lev_d_1)//1}\n')
-        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}\nLevenshstein distance: {np.mean(lev_d)//3}\n')
+        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}\nLevenshstein distance-1: {np.mean(lev_d_1)//1}\n')
+        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}\nLevenshstein distance-3: {np.mean(lev_d)//3}\n')
         for i, j in rouge_score.items():
             writer.write(f"{i}: Prec: {j['p']} Rec: {j['r']} F1: {j['f']}\n")
         writer.write(f"Average metoer score: {np.mean(meteor_score_s)}")
