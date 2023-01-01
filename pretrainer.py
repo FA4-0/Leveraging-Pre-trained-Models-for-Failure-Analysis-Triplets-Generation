@@ -47,13 +47,13 @@ from pytorchtools import EarlyStopping
 from torch.utils.data import Dataset, random_split
 from transformers import (WEIGHTS_NAME, CONFIG_NAME,
                             GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, #GPT Model
-                            BertTokenizer, BertLMHeadModel, BertConfig, #Bert Model
-                            RobertaTokenizer, RobertaForCausalLM, RobertaConfig, #Roberta Model
+                            BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
+                            RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, #Roberta Model #---
                             XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
                             XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
                             TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
                             OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
-                            BartTokenizer, BartForCausalLM, BartConfig,
+                            BartTokenizer, BartForConditionalGeneration, BartConfig, #---
                             T5Tokenizer, T5ForConditionalGeneration, T5Config,
                             )
 from transformers import AdamW, get_linear_schedule_with_warmup
@@ -156,26 +156,33 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
                       'labels':         batch[0],
                       'attention_mask': batch[1],
                       }
-            #----- using token-type_ids where necessary
+            #----- adding token-type_ids where necessary
             causal_languages = ['distilbert-base-uncased', 'facebook/bart-large-cnn', 
-                               'roberta-large', 'distilbert-base-uncased']
+                               'roberta-base', 'bert-base-uncased']
             if not args.model_type in causal_languages:
                 if not args.use_weights:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[2]
                 else:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
-                    
-            if not args.model_type in causal_languages:
+            #------ selective output
+            if not args.encoder_decoder:
+                if not args.model_type in causal_languages:
+                    outputs  = model(inputs['input_ids'], 
+                                     attention_mask = inputs['attention_mask'],
+                                     labels = inputs['labels'],
+                                     token_type_ids = inputs['token_type_ids']
+                                     )
+                else: #for distilbert and 
+                    outputs  = model(inputs['input_ids'], 
+                                     attention_mask = inputs['attention_mask'],
+                                     labels = inputs['labels'],
+                                     )
+            else:
                 outputs  = model(inputs['input_ids'], 
-                                 attention_mask = inputs['attention_mask'],
-                                 labels = inputs['labels'],
-                                 token_type_ids = inputs['token_type_ids']
-                                 )
-            else: #for distilbert and 
-                outputs  = model(inputs['input_ids'], 
-                                 attention_mask = inputs['attention_mask'],
-                                 labels = inputs['labels'],
-                                 )
+                                     attention_mask = inputs['attention_mask'],
+                                     decoder_input_ids = inputs['labels'],
+                                     labels = inputs['labels'],
+                                     )
             if args.use_weights:
                 tmp_eval_loss = batch[2] * outputs['loss']
             else:
@@ -336,24 +343,31 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                       }
             #----- adding token-type_ids where necessary
             causal_languages = ['distilbert-base-uncased', 'facebook/bart-large-cnn', 
-                               'roberta-large', 'distilbert-base-uncased']
+                               'roberta-base', 'bert-base-uncased']
             if not args.model_type in causal_languages:
                 if not args.use_weights:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[2]
                 else:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
-                    
-            if not args.model_type in causal_languages:
+            #------selective output
+            if not args.encoder_decoder:
+                if not args.model_type in causal_languages:
+                    outputs  = model(inputs['input_ids'], 
+                                     attention_mask = inputs['attention_mask'],
+                                     labels = inputs['labels'],
+                                     token_type_ids = inputs['token_type_ids']
+                                     )
+                else: #for distilbert and 
+                    outputs  = model(inputs['input_ids'], 
+                                     attention_mask = inputs['attention_mask'],
+                                     labels = inputs['labels'],
+                                     )
+            else:
                 outputs  = model(inputs['input_ids'], 
-                                 attention_mask = inputs['attention_mask'],
-                                 labels = inputs['labels'],
-                                 token_type_ids = inputs['token_type_ids']
-                                 )
-            else: #for distilbert and 
-                outputs  = model(inputs['input_ids'], 
-                                 attention_mask = inputs['attention_mask'],
-                                 labels = inputs['labels'],
-                                 )
+                                     attention_mask = inputs['attention_mask'],
+                                     decoder_input_ids = inputs['labels'],
+                                     labels = inputs['labels'],
+                                     )
             if args.use_weights:
                 loss = batch[2] * outputs['loss']
             else:
@@ -435,10 +449,10 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
 def main():
     #Model config, Model and their respective tokenizers
     MODEL_CLASSES = {
-                    'facebook/bart-large-cnn': (BartConfig, BartForCausalLM, BartTokenizer),
-                    'bert-base-uncased': (BertConfig, BertLMHeadModel, BertTokenizer), #masked model I
-                    'roberta-large': (RobertaConfig, RobertaForCausalLM, RobertaTokenizer), #masked model II
-                    'xlnet-large-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
+                    'facebook/bart-large-cnn': (BartConfig, BartForConditionalGeneration, BartTokenizer),
+                    'bert-base-uncased': (BertConfig, EncoderDecoderModel, BertTokenizer), #Causal model I
+                    'roberta-base': (RobertaConfig, EncoderDecoderModel, RobertaTokenizer), #Causal model II
+                    'xlnet-base-cased': (XLNetConfig, XLNetLMHeadModel, XLNetTokenizer),
                     'openai-gpt': (OpenAIGPTConfig, OpenAIGPTLMHeadModel, OpenAIGPTTokenizer),
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
@@ -520,6 +534,9 @@ def main():
     parser.add_argument("--do_lower_case",
                         action = 'store_true',
                         help = "Set this flag if you are using an uncased model.")
+    parser.add_argument("--encoder_decoder",
+                        action = 'store_true',
+                        help = "Set this flag if model is Encoder-Decoder type model like BERT and RoBerta.")
     parser.add_argument("--return_token_type_ids",
                         action = 'store_true',
                         help = "Return return_token_type_ids...useful for some models.")
@@ -602,8 +619,8 @@ def main():
         absolute_dir = f'plm/use_weight/{args.year}'
     else:
         absolute_dir = f'plm/finetuning/{args.year}'
-    args.output_dir = join(join(absolute_dir, args.model_name_or_path), args.output_dir)
-    args.eval_dir = join(join(absolute_dir, args.model_name_or_path), args.eval_dir)
+    args.output_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.output_dir)
+    args.eval_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.eval_dir)
     #--------------------------------- main
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
@@ -633,17 +650,39 @@ def main():
     # Load pretrained model and tokenizer
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
-
+    # encoder_decoder_mod = ['bert-base-uncased', 'roberta-large']
     args.model_type = args.model_type.lower()
-    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
-    config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,) #Config class
+    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]        
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
                                                 bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
-    model = model_class.from_pretrained(args.model_name_or_path, from_tf = bool('.ckpt' in args.model_name_or_path), config = config) #LM class
+    #---- check if we are using EncoderDecoder Model or not
+    if args.encoder_decoder:
+        config_enc = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path)
+        config_dec = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path)
+        model = model_class.from_encoder_decoder_pretrained(args.model_name_or_path, args.model_name_or_path, 
+                                                            encoder_config = config_enc, decoder_config = config_dec, 
+                                                            tie_encoder_decoder = True)
+        model.config.decoder_start_token_id = tokenizer.cls_token_id
+        model.config.pad_token_id = tokenizer.pad_token_id
+        model.config.eos_token_id = tokenizer.eos_token_id
+        model.config.bos_token_id = tokenizer.bos_token_id
+        model.config.pad_token = tokenizer.pad_token
+        model.config.decoder_start_token_id = 0
+        model.config.no_repeat_ngram_size = 3
+        model.config.length_penalty = 2.0
+        model.config.vocab_size = model.config.decoder.vocab_size
+    else:
+        config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path)
+        model = model_class.from_pretrained(args.model_name_or_path, from_tf = bool('.ckpt' in args.model_name_or_path), config = config) #LM class
     embedding_size = model.get_input_embeddings().weight.shape[0]
     #----
     if len(tokenizer) > embedding_size:
-        model.resize_token_embeddings(len(tokenizer))
+        if not args.encoder_decoder:
+            model.resize_token_embeddings(len(tokenizer))
+        else:
+            model.encoder.resize_token_embeddings(len(tokenizer))
+            model.decoder.resize_token_embeddings(len(tokenizer))
+            
     logging.info(f'  Embedding size: {embedding_size}')
     
     if args.local_rank == 0:
@@ -806,15 +845,15 @@ def main():
     less_scores_1 = {'lev_d': lev_d_1, 'prec_lev': prec_lev_1, 'rec_lev': rec_lev_1, 'fs_lev': fs_lev_1} #LESE-1 ..variable name is lese_scores_1 not *less*
     less_scores = {'lev_d': lev_d, 'prec_lev': prec_lev, 'rec_lev': rec_lev, 'fs_lev': fs_lev} #LESE-3
     logger.info(f"  Average blue score: {np.mean(bluescore)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_bleuscore_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_bleuscore_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore)
     logger.info('  *********************************Done computing self-BELU score*********************************')
     logger.info(f"  Average blue-3 score: {np.mean(bluescore_3)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_bleuscore3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore_3)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_bleuscore3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore_3)
     logger.info('  *********************************Done computing self-BELU score**********************************************')
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_lese1_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores_1)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_lese1_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores_1)
     logger.info(f'  LESE Precision: {np.mean(prec_lev_1)}\nLESE Recall: {np.mean(rec_lev_1)}\nLESE F1-score: {np.mean(fs_lev_1)}')
     logger.info('   ****************************************Done computing LESE score**********************************************')
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_lese3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_lese3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores)
     logger.info(f'  LESE Precision: {np.mean(prec_lev)}\nLESE Recall: {np.mean(rec_lev)}\nLESE F1-score: {np.mean(fs_lev)}')
     logger.info('   *************************************Done computing LESE score***********************************************')
     #------------------ Remove empty/null hypothesis before computing ROUGE and METEOR scores -------------------------
@@ -825,25 +864,25 @@ def main():
     rouge = Rouge()
     rouge_score = rouge.get_scores(model_generated_fas, target, avg = True)
     logger.info(f'  ROUGE SCORES: {rouge_score}')
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_rouge_{len(x_nns)}_{args.num_train_epochs}_{args.year}.npy"), rouge_score)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_rouge_{len(x_nns)}_{args.num_train_epochs}_{args.year}.npy"), rouge_score)
     logger.info('  ************************************Done computing ROUGE score*****************************************')
     logger.info(f"  Average metoer score: {np.mean(meteor_score_s)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
     logger.info('  **************************************Done computing METEOR score**************************************')
     #--- save complete evaluation results in seperate file
     output_eval_file = os.path.join(args.eval_dir, "eval_metric_results.txt")
     with open(output_eval_file, "w+") as writer:
         logger.info("   ***** Storing complete evaluation results *****")
-        writer.write("   ***** Complete eval results *****")
-        writer.write(f"Average blue score: {np.mean(bluescore)}")
-        writer.write(f"Average blue-3 score: {np.mean(bluescore_3)}")
-        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}\nLevenshstein distance: {np.mean(lev_d_1)//1}')
-        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}\nLevenshstein distance: {np.mean(lev_d)//3}')
+        writer.write("   ***** Complete eval results *****\n")
+        writer.write(f"Average blue score: {np.mean(bluescore)}\n")
+        writer.write(f"Average blue-3 score: {np.mean(bluescore_3)}\n")
+        writer.write(f'LESE-1 Precision: {np.mean(prec_lev_1)}\nLESE-1 Recall: {np.mean(rec_lev_1)}\nLESE-1 F1-score: {np.mean(fs_lev_1)}\nLevenshstein distance: {np.mean(lev_d_1)//1}\n')
+        writer.write(f'LESE-3 Precision: {np.mean(prec_lev)}\nLESE-3 Recall: {np.mean(rec_lev)}\nLESE-3 F1-score: {np.mean(fs_lev)}\nLevenshstein distance: {np.mean(lev_d)//3}\n')
         for i, j in rouge_score.items():
-            writer.write(f'{i}: {j}')
+            writer.write(f"{i}: Prec: {j['p']} Rec: {j['r']} F1: {j['f']}\n")
         writer.write(f"Average metoer score: {np.mean(meteor_score_s)}")
     writer.close()
-    
+    logger.info("   ***** Evaluation completed! *****")
     
 if __name__ == "__main__":
     main()
