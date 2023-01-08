@@ -1,7 +1,6 @@
 import os
 import numpy as np
 from os.path import join
-import numpy as np
 path = os.getcwd()
 year = 2019
 absoulte_dir = [join(path, f'plm/finetuning/{year}'), join(path, f'plm/use_weight/{year}')]
