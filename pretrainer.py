@@ -3,6 +3,7 @@ seed_val = seed_trn = 42
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.nn import CrossEntropyLoss
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
@@ -123,6 +124,242 @@ def prepretreat(x, stopword = None, threshold = None):
     return ' '.join(re.sub('\[^a-zA-Z0-9\n\.]', ' ', x) for x in txt.split(' ') if not len(x) < threshold if not any(z.isdigit() for z in x)) #remove special characters from string
 
 
+#%% Training function
+    
+class PIDControl():
+    """PID controller for functions with Lagrangian hyper-parameters"""
+    def __init__(self):
+        """define them out of loop"""
+        self.I_k1 = 0.0
+        self.W_k1 = 0.0
+        self.e_k1 = 0.0
+        
+    def _Kp_fun(self, Err, scale = 1):
+        return 1.0/(1.0 + float(scale)*torch.exp(Err))
+        
+    def pid(self, exp_KL, kl_loss, Kp = 0.01, Ki = -0.0001):
+        #Kp = 0.001, Ki = -0.001 <-- Try this if results are unsatisfactory.
+        """
+        position PID algorithm
+        Input: kl_loss
+        return: weight for KL loss, beta
+        """
+        self.exp_KL = exp_KL
+        error_k = torch.tensor(self.exp_KL - kl_loss, requires_grad = False)
+        ## comput U as the control factor
+        Pk = Kp * self._Kp_fun(error_k)
+        Ik = self.I_k1 + Ki * error_k
+
+        ## window up for integrator
+        if self.W_k1 < 0 and self.W_k1 > 1:
+            Ik = self.I_k1
+            
+        Wk = Pk + Ik
+        self.W_k1 = Wk
+        self.I_k1 = Ik
+        self.e_k1 = error_k
+        
+        ## min and max value
+        if Wk > 1:
+            Wk = 1.0
+        if Wk < 0:
+            Wk = 0.0
+        
+        return Wk
+    
+    
+def variational_loss(logits, labels, model, args):
+    #-- utility functions ...
+    def compute_kernel(x, y):
+        if len(x.size()) > 2:
+            x, y = x[-1, :, :], y[-1, :, :]
+        x, y = x[:, :args.latent_dim], y[:, :args.latent_dim]
+        x_size, y_size = x.size(0), y.size(0)
+        dim = x.size(1)
+        x = x.unsqueeze(1) # (x_size, 1, dim)
+        y = y.unsqueeze(0) # (1, y_size, dim)
+        tiled_x = x.expand(x_size, y_size, dim)
+        tiled_y = y.expand(x_size, y_size, dim)
+        kernel_input = (tiled_x - tiled_y).pow(2).mean(2)/float(dim)
+        return torch.exp(-kernel_input) # (x_size, y_size)
+    
+    def compute_mmd(x, y):
+        x_kernel = compute_kernel(x, x)
+        y_kernel = compute_kernel(y, y)
+        xy_kernel = compute_kernel(x, y)
+        mmd = x_kernel.mean() + y_kernel.mean() - 2*xy_kernel.mean()
+        return mmd
+    
+    def z_mahalanobis_fn(z, diag:bool = False, psd = False)->float:
+        '''
+        Parameters
+        ----------
+        z : numpy array
+            latent array/code.
+        diag : bool, optional
+            Diagonal of the covariance matrix. The default is False.
+    
+        Returns
+        -------
+        float
+            mahalanobis mean of the latent vector.
+    
+        '''
+        if len(z.size()) > 2:
+            z = z[-1, :, :] #--covert [1, N, M] --> [N, M]
+        z = z[:, :args.latent_dim]
+        m = lambda z: z - z.mean(axis = 0) #mean of vectors
+        z_m = m(z) #mean centered data
+        cov = 1/(len(z)-1)*torch.matmul(z_m.T, z_m)
+        diag_cov = torch.diag(torch.diag(cov))
+        #check if matrix entries are 
+        if not psd:
+            cov = 1/(len(z)-1)*torch.matmul(z_m.T, z_m)
+            diag_cov = torch.diag(torch.diag(cov))
+        else:
+            cov = 1/(len(z)-1)*torch.matmul(z_m.T, z_m)
+            cov = torch.where(cov < 0, 0, cov)
+            diag_cov = torch.diag(torch.diag(cov))
+            diag_cov = torch.where(diag_cov < 0, 0, diag_cov)
+        if not diag:
+            inv_cov = torch.linalg.inv(cov) #inverse of a full covariance matrix
+        else:
+            inv_cov = torch.linalg.inv(diag_cov) #inverse of diagonal covariance matrix
+        trans_x = torch.matmul(torch.matmul(z_m, inv_cov), z_m.T)
+        mah_mat_mean = trans_x.diagonal().mean() #torch.diagonal()
+        return mah_mat_mean
+    
+    def z_mahalanobis_gcvae(z, diag:bool = False, psd = False)->float:
+        '''Reproducing Kernel Hilbert Space (RKHS)
+           Mahalanobis distance
+        
+    
+        Parameters
+        ----------
+        z : numpy array
+            latent array/code.
+        diag : bool, optional
+            Diagonal of the covariance matrix. The default is False.
+        
+        psd: bool, optional
+            is matrix is not positive semi definite
+            
+        Returns
+        -------
+        float
+            mahalanobis mean of the latent vector.
+    
+        '''
+        if len(z.size()) > 2:
+            z = z[-1, :, :] #--covert [1, N, M] --> [N, M]
+        z = z[:, :args.latent_dim]
+        m = lambda z: z - z.mean(axis = 0) #mean of vectors
+        z_m = m(z) #mean centered data
+        #check if matrix entries are 
+        if not psd:
+            cov = 1/(len(z)-1)*torch.matmul(z_m.T, z_m)
+            diag_cov = torch.diag(torch.diag(cov))
+        else:
+            cov = 1/(len(z)-1)*torch.matmul(z_m.T, z_m)
+            cov = torch.where(cov < 0, 0, cov)
+            diag_cov = torch.diag(torch.diag(cov))
+            diag_cov = torch.where(diag_cov < 0, 0, diag_cov)
+        if not diag:
+            inv_cov = torch.linalg.inv(cov) #inverse of a full covariance matrix
+        else:
+            inv_cov = torch.linalg.inv(diag_cov) #inverse of diagonal covariance matrix
+        z_sample = torch.randn(z.size(), dtype = torch.float32)
+        mah_gcvae = inv_cov * compute_mmd(z_sample, z) #-- compute  MMD
+        mah_gcvae_mean = mah_gcvae.diagonal().mean()
+        return mah_gcvae_mean
+    
+    #--MMD
+    def mmd(z):
+        z_sample = torch.randn(z.size(), dtype = torch.float32)
+        return compute_mmd(z_sample, z)
+    
+    #--Mahalanobis 
+    def z_mahalanobis(z):
+        return z_mahalanobis_fn(z)
+    
+    #--Mahalanobis GCVAE
+    def z_mah_gcvae(z):
+        return z_mahalanobis_gcvae(z)
+    
+    #--cross-entropy loss
+    def cross_entropy_loss(logits, labels, model, args):
+        loss_fct = CrossEntropyLoss(reduction = 'none') #loss
+        if labels is not None:
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)).mean(dim=-1)
+        return loss
+    
+    #--Kl divergence loss
+    def kl_loss(logits, labels, model, args):
+        kl_loss = nn.KLDivLoss(reduction = 'batchmean')(logits[:, :-1].log_softmax(dim = -1), logits[:, 1:].softmax(dim = -1)) #used lmhead or logit
+        kl_loss = kl_loss.mean()
+        return kl_loss
+    #--define latent space using logits
+    z = logits.softmax(dim = -1)
+    #--Maximum Mean Discrepancy
+    if args.mmd_type == 'mmd':
+        mmd_fn = mmd
+    elif args.mmd_type == 'mah':
+        mmd_fn = z_mahalanobis
+    elif args.mmd_type == 'mah_gcvae':
+        mmd_fn = z_mah_gcvae
+    
+    #-- compute variational losses..
+    bce = cross_entropy_loss(logits, labels, model, args)
+    kld = kl_loss(logits, labels, model, args)
+    # logger.info(f'\n\nBCE: {BCE}\nKLD: {KLD}')
+    #select parameters...
+    if args.vae_model_name.lower() == 'elbo':
+        alpha, beta, gamma = -1, 1, 0
+        mmd_xy = 0
+    elif args.vae_model_name == 'betavae':
+        alpha, beta, gamma = -1, args.beta, 0
+        mmd_xy = 0
+    elif args.vae_model_name.lower() == 'controlvae':
+        alpha = 0 
+        beta = PIDControl().pid(args.init_kld, kld)
+        gamma = 0
+        mmd_xy = 0
+    elif args.vae_model_name.lower() == 'infovae':
+        alpha, beta = 0, 0
+        gamma = args.gamma
+        mmd_xy = mmd_fn(z)
+    elif args.vae_model_name.lower() == 'gcvae':
+        mmd_xy = mmd_fn(z)
+        alpha = PIDControl().pid(args.init_bce, bce) #reconstruction weight --> cross entropy weight
+        beta = PIDControl().pid(args.init_kld, kld) #weight on KL-divergence --> Kullback-Leibler divergence.
+        gamma = PIDControl().pid(args.init_mmd, mmd_xy)
+    else:
+        return ValueError(f'Unknown loss type: {args.vae_model_name}')
+    #--
+    vae_loss = (1-alpha-beta)*bce + beta*kld + gamma*mmd_xy
+    return vae_loss, bce, kld, alpha, beta, gamma
+    
+        
+def _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint', use_mtime = False):
+    if not args.save_total_limit:
+        return
+    if args.save_total_limit <= 0:
+        return
+    
+    # Check if we should delete older checkpoint(s)
+    output_dir = os.path.abspath(args.output_dir)
+    checkpoints = [output_dir]
+    if os.path.isdir(output_dir):
+        checkpoints = list(os.path.join(output_dir, n) for n in os.listdir(output_dir))
+        if args.local_rank not in [-1, 0]:
+            checkpoints = [checkpoint for checkpoint in checkpoints if torch.distributed.get_rank() == int(checkpoint.split('-')[-1])]
+        checkpoints.sort(key=lambda x: int(x.split('-')[-1]) if len(x.split('-')) > 1 else 0)
+        if len(checkpoints) > args.save_total_limit:
+            logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoints[0]))
+            shutil.rmtree(checkpoints[0])
+            
 #%% Evaluation function
 
 def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
@@ -183,13 +420,17 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
                                      decoder_input_ids = inputs['labels'],
                                      labels = inputs['labels'],
                                      )
-            if args.use_weights:
-                tmp_eval_loss = batch[2] * outputs['loss']
+            if not args.use_variational_loss:
+                if args.use_weights:
+                    tmp_eval_loss = batch[2] * outputs['loss']
+                else:
+                    tmp_eval_loss = outputs['loss']
             else:
-                tmp_eval_loss = outputs['loss']
-                    
+                logits = outputs['logits']
+                tmp_eval_loss, bce, kld, alpha, beta, gamma = variational_loss(logits, inputs['labels'], model, args)
+            #--
             avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
-            avg_templ_ppl = np.exp(avg_tmp_eval_loss) #average batch perplexity
+            avg_templ_ppl = np.exp(bce) #average batch perplexity
             eval_loss += avg_tmp_eval_loss #total inreamental loss
             perplexity += avg_templ_ppl #
         nb_eval_steps += 1
@@ -200,7 +441,7 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
     if not os.path.exists(output_eval_file):
         with open(output_eval_file, "w+") as writer:
             logger.info("   ***** Eval loss results *****")
-            writer.write("   ***** Eval loss results *****")
+            writer.write("   ***** Eval loss results *****\n")
             writer.write(f"Evaluation loss: {eval_loss} PPL: {perplexity}\n")
     else:
         with open(output_eval_file, "a+") as writer:
@@ -209,43 +450,8 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
     
     return eval_loss, perplexity
 
+#%% Defining the training loop
 
-#%% Training function
-
-#KL loss
-
-def loss_fn_kl(output, target, model, args, labels, num_tokens, device):
-    lprobs = F.log_softmax(output, dim=-1)
-    loss = F.nll_loss(lprobs.view(-1, lprobs.size(-1)), target.view(-1), reduction='sum')
-    loss = loss / num_tokens
-    # KL Divergence
-    kl_loss = 0
-    for p in model.parameters():
-        if p.requires_grad:
-            kl_loss += 0.5 * torch.sum(torch.pow(p, 2))
-    kl_loss = kl_loss * args.kl_lambda
-    loss = loss + kl_loss
-    return loss
-
-def _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint', use_mtime = False):
-    if not args.save_total_limit:
-        return
-    if args.save_total_limit <= 0:
-        return
-
-    # Check if we should delete older checkpoint(s)
-    output_dir = os.path.abspath(args.output_dir)
-    checkpoints = [output_dir]
-    if os.path.isdir(output_dir):
-        checkpoints = list(os.path.join(output_dir, n) for n in os.listdir(output_dir))
-        if args.local_rank not in [-1, 0]:
-            checkpoints = [checkpoint for checkpoint in checkpoints if torch.distributed.get_rank() == int(checkpoint.split('-')[-1])]
-        checkpoints.sort(key=lambda x: int(x.split('-')[-1]) if len(x.split('-')) > 1 else 0)
-        if len(checkpoints) > args.save_total_limit:
-            logger.info("Deleting older checkpoint [{}] due to args.save_total_limit".format(checkpoints[0]))
-            shutil.rmtree(checkpoints[0])
-            
-#Defining the training loop
 def train(args, train_dataset, eval_dataset, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
@@ -322,7 +528,9 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             logger.info("  Start fine-tuning...")
 
     avg_tr_loss, avg_eval_loss, avg_ppl = [], [], []
+    avg_kl, avg_alpha, avg_beta, avg_gamma = [], [], [], []
     tr_loss, logging_loss = 0.0, 0.0
+    tr_kl_loss, tr_alpha, tr_beta, tr_gamma = 0.0, 0.0, 0.0, 0.0
     model.zero_grad()
     train_iterator = trange(epochs_trained, int(args.num_train_epochs), desc = "Epoch", disable = args.local_rank not in [-1, 0])
     set_seed(args.seed)  # Added here for reproducibility (even between python 2 and 3)
@@ -351,6 +559,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                 else:
                     inputs['token_type_ids'] = None if args.model_type == 'xlm-roberta-large' else batch[3]
             #------selective output
+            #-- outputs = dict('loss', 'logits', 'past_key_values')
             if not args.encoder_decoder:
                 if not args.model_type in causal_languages:
                     outputs  = model(inputs['input_ids'], 
@@ -369,12 +578,16 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                                      decoder_input_ids = inputs['labels'],
                                      labels = inputs['labels'],
                                      )
-            if args.use_weights:
-                loss = batch[2] * outputs['loss']
+            if not args.use_variational_loss:
+                if args.use_weights:
+                    loss = batch[2] * outputs['loss']
+                else:
+                    loss = outputs['loss']
             else:
-                loss = outputs['loss']
-
-                    
+                logits = outputs['logits']
+                loss, bce, kld, alpha, beta, gamma = variational_loss(logits, inputs['labels'], model, args)
+                
+            #------
             if args.n_gpu > 1:
                 loss = loss.mean()
             if args.gradient_accumulation_steps > 1:
@@ -387,8 +600,14 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             else:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
-            tr_loss += loss.item()
+            if not args.use_variational_loss:
+                tr_loss += loss.item()
+            else:
+                tr_loss += loss.item()
+                tr_kl_loss += kld.item()
+                tr_alpha += alpha
+                tr_beta += beta
+                tr_gamma += gamma
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 if args.fp16:
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
@@ -399,9 +618,20 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
                 scheduler.step()
                 model.zero_grad()
                 global_step += 1
-                
-        tr_loss_tmp = tr_loss / global_step
-        avg_tr_loss.append(tr_loss_tmp)
+        if not args.use_variational_loss:     
+            tr_loss_tmp = tr_loss / global_step
+            avg_tr_loss.append(tr_loss_tmp)
+        else:
+            tr_loss_tmp = tr_loss / global_step
+            tr_kl_tmp = tr_kl_loss / global_step
+            tr_alpha_tmp = tr_alpha / global_step
+            tr_beta_tmp = tr_beta / global_step
+            tr_gamma_tmp = tr_gamma / global_step
+            avg_tr_loss.append(tr_loss_tmp)
+            avg_kl.append(tr_kl_tmp)
+            avg_alpha.append(tr_alpha_tmp)
+            avg_beta.append(tr_beta_tmp)
+            avg_gamma.append(tr_gamma_tmp)
         #---model evaluation
         if args.local_rank in [-1, 0]:
             # Log metrics
@@ -414,10 +644,19 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             tb_writer.add_scalar('lr', scheduler.get_lr()[0], global_step)
             tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
             logging_loss = tr_loss
-    
-    np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss)
-    np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss)
-    np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl)
+    if not args.use_variational_loss:
+        np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss) #final training loss
+        np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss) #final evluation loss
+        np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl) #final evaluation perplexity
+    else:
+        np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss) #final training loss
+        np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss) #final evluation loss
+        np.save(join(args.eval_dir, 'training_kl.npy'), avg_kl) #final training kl-divergence loss
+        np.save(join(args.eval_dir, 'training_alpha.npy'), avg_alpha) #final training alpha
+        np.save(join(args.eval_dir, 'training_beta.npy'), avg_beta) #final training beta
+        np.save(join(args.eval_dir, 'training_gamma.npy'), avg_gamma) #final training gamma
+        np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss) #final evluation loss
+        np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl) #final evaluation perplexity
     #-----save model
     if args.local_rank in [-1, 0]:
         # Save model checkpoint
@@ -436,9 +675,6 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
         torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
         logger.info("  Saving optimizer and scheduler states to {output_dir}")
 
-        # if args.max_steps > 0 and global_step > args.max_steps:
-        #     epoch_iterator.close()
-        #     break
     if args.local_rank in [-1, 0]:
         tb_writer.close()
 
@@ -458,6 +694,7 @@ def main():
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-large': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
+                    'gpt2-xl': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     # 't5-base': (T5Config, T5ForConditionalGeneration, T5Tokenizer),
                     # 't5-small': (T5Config, T5ForConditionalGeneration, T5Tokenizer ),
                     # 't5-large': (T5Config, T5ForConditionalGeneration, T5Tokenizer ),
@@ -511,15 +748,15 @@ def main():
     parser.add_argument("--bos_token",
                         type = str,
                         default = '<|startoftext|>',
-                        help = "random seed for initialization")
+                        help = "Beginning of sentence token")
     parser.add_argument("--eos_token",
                         type = str,
                         default = '<|endoftext|>',
-                        help = "random seed for initialization")
+                        help = "End of sentence token")
     parser.add_argument("--pad_token",
                         type = str,
                         default = '<|pad|>',
-                        help = "random seed for initialization")
+                        help = "padding token")
     parser.add_argument("--do_train",
                         action='store_true',
                         help="Whether to run training.")
@@ -538,6 +775,41 @@ def main():
     parser.add_argument("--encoder_decoder",
                         action = 'store_true',
                         help = "Set this flag if model is Encoder-Decoder type model like BERT and RoBerta.")
+    parser.add_argument("--use_variational_loss",
+                        action = 'store_true',
+                        help = "Use variational loss instead of simply CrossEntropy loss")
+    parser.add_argument("--vae_model_name",
+                        type = str,
+                        default = 'vae',
+                        help = "Indicate name of variational name e.x VAE, ControlVAE, InfoVAE, GCVAE")
+    parser.add_argument("--mmd_type",
+                        type = str,
+                        default = 'mah',
+                        help = "Type of distance metric to use. Applie to InfoVAE and GCVAE")
+    parser.add_argument("--beta",
+                        type = float,
+                        default = 1.0,
+                        help = "Parameter for training beta-VAE only")
+    parser.add_argument("--gamma",
+                        type = float,
+                        default = 500.0,
+                        help = "Parameter for training InfoVAE (MMD-VAE) only")
+    parser.add_argument("--init_kld",
+                        type = float,
+                        default = 10.0,
+                        help = "Initial KL-divergence loss when using PID-controller only")
+    parser.add_argument("--init_bce",
+                        type = float,
+                        default = 10.0,
+                        help = "Initial Binary-Cross Entropy loss when using PID-controller only")
+    parser.add_argument("--init_mmd",
+                        type = float,
+                        default = 0.1,
+                        help = "Initial Maximum Mean Discrepancy when using PID-controller only")
+    parser.add_argument("--latent_dim",
+                        type = int,
+                        default = 10,
+                        help = "Dimension of the latent space used for computating variational loss")
     parser.add_argument("--return_token_type_ids",
                         action = 'store_true',
                         help = "Return return_token_type_ids...useful for some models.")
@@ -616,10 +888,14 @@ def main():
                         help = "For distributed training: local_rank is 0 and -1 for unit gpu")
     args = parser.parse_args()
     #-----------------set root directories
-    if args.use_weights:
-        absolute_dir = f'plm/use_weight/{args.year}'
+    if not args.use_variational_loss:
+        if args.use_weights:
+            absolute_dir = f'plm/use_weight/{args.year}'
+        else:
+            absolute_dir = f'plm/finetuning/{args.year}'
     else:
-        absolute_dir = f'plm/finetuning/{args.year}'
+        absolute_dir = f'plm/{args.vae_model_name}/{args.year}'
+    #----
     args.output_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.output_dir)
     args.eval_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.eval_dir)
     #--------------------------------- main
@@ -643,7 +919,7 @@ def main():
                         datefmt = '%m/%d/%Y %H:%M:%S',
                         level = logging.INFO if args.local_rank in [-1, 0] else logging.WARN,
                         )
-    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s", args.local_rank, device, args.n_gpu, bool(args.local_rank != -1), args.fp16)
+    logger.warning("Process rank: %s, device: %s, n_gpu: %s, distributed training: %s, 16-bits training: %s", args.local_rank, args.device, args.n_gpu, bool(args.local_rank != -1), args.fp16)
 
     # Set seed
     set_seed(args.seed)
@@ -724,8 +1000,8 @@ def main():
     
     #-- Probabilistic weights
     z_size = 2
-    gcvaemodel = 'mah'
-    pl = np.load(join(path, f'b/gcvae/fagcvaegmm_st_sst/latent_{z_size}/500/{gcvaemodel}/gmm_proba_st_sst.npy')) #local
+    gcvaemodel = args.mmd_type
+    pl = np.load(join(path, f'b/gcvae/fagcvaegmm/latent_{z_size}/500/{gcvaemodel}/gmm_proba.npy')) #local
     pl = np.max(pl, 1) #returns maximum along horizontal axis...
     if args.use_weights:
         dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length, wts = pl, use_weights = args.use_weights)
