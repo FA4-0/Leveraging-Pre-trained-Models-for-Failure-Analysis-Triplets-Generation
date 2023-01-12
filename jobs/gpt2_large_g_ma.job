@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=w_m-2tpg
+#SBATCH --job-name=l-2tpg_g_ma
 #SBATCH --mail-user=ifeanyi.ezukwoke@emse.fr
 #SBATCH --mail-type=ALL
 #SBATCH --gres=gpu:1
@@ -26,14 +26,14 @@ echo -----------------------------------------------
 echo Run program...
 source ~/meso-env/env.sh
 python pretrainer.py \
-        --model_type gpt2-medium \
-        --model_name_or_path gpt2-medium \
+        --model_type gpt2-large \
+        --model_name_or_path gpt2-large \
         --do_train \
         --do_eval \
         --max_seq_length 128 \
         --per_gpu_train_batch_size 1 \
         --learning_rate 5e-5 \
-        --num_train_epochs 5.0 \
+        --num_train_epochs 10.0 \
         --output_dir result/ \
         --eval_dir evaluation/ \
         --overwrite_output_dir \
@@ -46,11 +46,18 @@ python pretrainer.py \
         --logging_steps 100 \
         --save_steps 100 \
         --evaluate_during_training \
-        --save_total_limit 1 \
         --adam_epsilon 1e-8 \
         --weight_decay 0.05 \
         --max_grad_norm 1.0 \
         --return_token_type_ids \
-        --use_weights \
+        --use_variational_loss \
+        --vae_model_name gcvae \
+        --mmd_type mah \
+        --beta 5.0 \
+        --gamma 500.0 \
+        --init_kld 1 \
+        --init_bce 0.01 \
+        --init_mmd 0.01 \
+        --latent_dim 100 \
         --max_steps -1 
 echo -----------------------------------------------
