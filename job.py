@@ -15,17 +15,17 @@ job_directory = os.path.join(path, 'jobs')
 # Make top level directories
 mkdir_p(job_directory)
 MODEL_CLASSES = {
-                    'facebook/bart-large-cnn': 'bart',
-                    'bert-base-uncased': 'bert', #masked model I
-                    'roberta-large': 'roberta', #masked model II
-                    'distilbert-base-uncased': 'dbert', #masked model III
-                    'xlnet-large-cased': 'xlnet',
-                    'openai-gpt': 'gpt3',
                     'gpt2': 'gpt2-b',
                     'gpt2-medium': 'gpt2-m',
                     'gpt2-large': 'gpt2-l',
+                    'gpt2-xl': 'gpt2-xl',
+                    'openai-gpt': 'gpt3',
+                    'facebook/bart-large-cnn': 'bart',
+                    'bert-base-uncased': 'bert', 
+                    'roberta-base': 'roberta', 
                     }
 
+exceptions = ['bert', 'roberta'] #EncoderDecoder Model
 for ij in set_flag:
     wflag = ij
     for i, j in MODEL_CLASSES.items():
@@ -36,18 +36,18 @@ for ij in set_flag:
         with open(job_file, 'w+') as writer:
             writer.writelines('#!/bin/bash -l\n')
             if not wflag:
-                writer.writelines(f'#SBATCH --job-name={j}\n')
+                writer.writelines(f'#SBATCH --job-name={j[::-1]}\n')
             else:
-                writer.writelines(f'#SBATCH --job-name=w{j}\n')
+                writer.writelines(f'#SBATCH --job-name=w_{j[::-1]}\n')
             writer.writelines('#SBATCH --mail-user=...\n')
             writer.writelines('#SBATCH --mail-type=ALL\n')
-            writer.writelines('#SBATCH --gres=...\n')
-            writer.writelines('#SBATCH --nodes=...\n')
-            writer.writelines('#SBATCH --ntasks=...\n')
-            writer.writelines('#SBATCH --cpus-per-task=...\n')
-            writer.writelines('#SBATCH --mem=...\n')
-            writer.writelines('#SBATCH --time=...\n')
-            writer.writelines('#SBATCH --partition=...\n')
+            writer.writelines('#SBATCH --gres=gpu:1\n')
+            writer.writelines('#SBATCH --nodes=1\n')
+            writer.writelines('#SBATCH --ntasks=1\n')
+            writer.writelines('#SBATCH --cpus-per-task=4\n')
+            writer.writelines('#SBATCH --mem=50G\n')
+            writer.writelines('#SBATCH --time=7-00:00:00\n')
+            writer.writelines('#SBATCH --partition=audace2018\n')
             writer.writelines('ulimit -l unlimited\n')
             writer.writelines('unset SLURM_GTIDS\n')
             writer.writelines('echo -----------------------------------------------\n')
@@ -85,11 +85,13 @@ for ij in set_flag:
             writer.writelines('        --logging_steps 100 \\\n')
             writer.writelines('        --save_steps 100 \\\n')
             writer.writelines('        --evaluate_during_training \\\n')
-            writer.writelines('        --save_total_limit 1 \\\n')
             writer.writelines('        --adam_epsilon 1e-8 \\\n')
             writer.writelines('        --weight_decay 0.05 \\\n')
             writer.writelines('        --max_grad_norm 1.0 \\\n')
             writer.writelines('        --return_token_type_ids \\\n')
+            #--
+            if j in exceptions:
+                writer.writelines('        --encoder_decoder \\\n')
             if not wflag:
                 pass
             else:
