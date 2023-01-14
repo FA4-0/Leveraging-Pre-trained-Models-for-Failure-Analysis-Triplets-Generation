@@ -46,8 +46,9 @@ import gc
 from torch.utils.tensorboard import SummaryWriter
 from pytorchtools import EarlyStopping
 from torch.utils.data import Dataset, random_split
-from transformers import (WEIGHTS_NAME, CONFIG_NAME,
-                            GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, #GPT Model
+from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
+                            AutoTokenizer, AutoModelForCausalLM, AutoConfig,
+                            GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
                             BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
                             RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, #Roberta Model #---
                             XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
@@ -137,7 +138,7 @@ class PIDControl():
     def _Kp_fun(self, Err, scale = 1):
         return 1.0/(1.0 + float(scale)*torch.exp(Err))
         
-    def pid(self, exp_KL, kl_loss, Kp = 0.01, Ki = -0.0001):
+    def pid(self, exp_KL, kl_loss, Kp = 0.001, Ki = -0.001):
         #Kp = 0.001, Ki = -0.001 <-- Try this if results are unsatisfactory.
         """
         position PID algorithm
@@ -190,7 +191,7 @@ def variational_loss(logits, labels, model, args):
         mmd = x_kernel.mean() + y_kernel.mean() - 2*xy_kernel.mean()
         return mmd
     
-    def z_mahalanobis_fn(z, diag:bool = False, psd = False)->float:
+    def z_mahalanobis_fn(z, diag:bool = True, psd = False)->float:
         '''
         Parameters
         ----------
@@ -229,7 +230,7 @@ def variational_loss(logits, labels, model, args):
         mah_mat_mean = trans_x.diagonal().mean() #torch.diagonal()
         return mah_mat_mean
     
-    def z_mahalanobis_gcvae(z, diag:bool = False, psd = False)->float:
+    def z_mahalanobis_gcvae(z, diag:bool = True, psd = False)->float:
         '''Reproducing Kernel Hilbert Space (RKHS)
            Mahalanobis distance
         
@@ -275,7 +276,7 @@ def variational_loss(logits, labels, model, args):
     
     #--MMD
     def mmd(z):
-        z_sample = torch.randn(z.size(), dtype = torch.float32)
+        z_sample = torch.randn(z.size(), dtype = torch.float32).to(args.device)
         return compute_mmd(z_sample, z)
     
     #--Mahalanobis 
@@ -300,6 +301,7 @@ def variational_loss(logits, labels, model, args):
         kl_loss = nn.KLDivLoss(reduction = 'batchmean')(logits[:, :-1].log_softmax(dim = -1), logits[:, 1:].softmax(dim = -1)) #used lmhead or logit
         kl_loss = kl_loss.mean()
         return kl_loss
+    
     #--define latent space using logits
     z = logits.softmax(dim = -1)
     #--Maximum Mean Discrepancy
@@ -315,7 +317,7 @@ def variational_loss(logits, labels, model, args):
     kld = kl_loss(logits, labels, model, args)
     # logger.info(f'\n\nBCE: {BCE}\nKLD: {KLD}')
     #select parameters...
-    if args.vae_model_name.lower() == 'elbo':
+    if args.vae_model_name.lower() == 'vae':
         alpha, beta, gamma = -1, 1, 0
         mmd_xy = 0
     elif args.vae_model_name == 'betavae':
@@ -334,7 +336,7 @@ def variational_loss(logits, labels, model, args):
         mmd_xy = mmd_fn(z)
         alpha = PIDControl().pid(args.init_bce, bce) #reconstruction weight --> cross entropy weight
         beta = PIDControl().pid(args.init_kld, kld) #weight on KL-divergence --> Kullback-Leibler divergence.
-        gamma = PIDControl().pid(args.init_mmd, mmd_xy)
+        gamma = PIDControl().pid(args.init_mmd, mmd_xy) #weight if correlation measure.
     else:
         return ValueError(f'Unknown loss type: {args.vae_model_name}')
     #--
@@ -429,10 +431,16 @@ def evaluate(args, eval_dataset, model, tokenizer, prefix=""):
                 logits = outputs['logits']
                 tmp_eval_loss, bce, kld, alpha, beta, gamma = variational_loss(logits, inputs['labels'], model, args)
             #--
-            avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
-            avg_templ_ppl = np.exp(bce) #average batch perplexity
-            eval_loss += avg_tmp_eval_loss #total inreamental loss
-            perplexity += avg_templ_ppl #
+            if not args.use_variational_loss:
+                avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
+                avg_templ_ppl = torch.exp(torch.tensor(avg_tmp_eval_loss).to(args.device)) #average batch perplexity
+                eval_loss += avg_tmp_eval_loss #total inreamental loss
+                perplexity += avg_templ_ppl #
+            else:
+                avg_tmp_eval_loss = tmp_eval_loss.mean().item() #average batch evaluation loss
+                avg_templ_ppl = torch.exp(bce) #average batch perplexity
+                eval_loss += avg_tmp_eval_loss #total inreamental loss
+                perplexity += avg_templ_ppl #
         nb_eval_steps += 1
     
     eval_loss /= nb_eval_steps
@@ -645,18 +653,18 @@ def train(args, train_dataset, eval_dataset, model, tokenizer):
             tb_writer.add_scalar('loss', (tr_loss - logging_loss)/args.logging_steps, global_step)
             logging_loss = tr_loss
     if not args.use_variational_loss:
-        np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss) #final training loss
-        np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss) #final evluation loss
-        np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl) #final evaluation perplexity
+        np.save(join(args.eval_dir, 'training_loss.npy'), torch.tensor(avg_tr_loss).cpu() if not isinstance(avg_tr_loss, list) else avg_tr_loss) #final training loss
+        np.save(join(args.eval_dir, 'evaluation_loss.npy'), torch.tensor(avg_eval_loss).cpu() if not isinstance(avg_eval_loss, list) else avg_eval_loss) #final evluation loss
+        np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl.cpu().numpy()) #final evaluation perplexity
     else:
-        np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss) #final training loss
+        np.save(join(args.eval_dir, 'training_loss.npy'), avg_tr_loss.cpu() if not isinstance(avg_tr_loss, list) else avg_tr_loss) #final training loss
+        np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss.cpu() if not isinstance(avg_eval_loss, list) else avg_eval_loss) #final evluation loss
+        np.save(join(args.eval_dir, 'training_kl.npy'), avg_kl.cpu() if not isinstance(avg_kl, list) else avg_kl) #final training kl-divergence loss
+        np.save(join(args.eval_dir, 'training_alpha.npy'), torch.tensor(avg_alpha).cpu()) #final training alpha
+        np.save(join(args.eval_dir, 'training_beta.npy'), torch.tensor(avg_beta).cpu()) #final training beta
+        np.save(join(args.eval_dir, 'training_gamma.npy'), torch.tensor(avg_gamma).cpu()) #final training gamma
         np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss) #final evluation loss
-        np.save(join(args.eval_dir, 'training_kl.npy'), avg_kl) #final training kl-divergence loss
-        np.save(join(args.eval_dir, 'training_alpha.npy'), avg_alpha) #final training alpha
-        np.save(join(args.eval_dir, 'training_beta.npy'), avg_beta) #final training beta
-        np.save(join(args.eval_dir, 'training_gamma.npy'), avg_gamma) #final training gamma
-        np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss) #final evluation loss
-        np.save(join(args.eval_dir, 'perplexity.npy'), avg_ppl) #final evaluation perplexity
+        np.save(join(args.eval_dir, 'perplexity.npy'), torch.tensor(avg_ppl).cpu()) #final evaluation perplexity
     #-----save model
     if args.local_rank in [-1, 0]:
         # Save model checkpoint
@@ -694,7 +702,11 @@ def main():
                     'gpt2': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-medium': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
                     'gpt2-large': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
-                    'gpt2-xl': (GPT2Config, GPT2LMHeadModel, GPT2Tokenizer),
+                    #'gpt2-xl': (GPT2Config, GPT2Model, GPT2Tokenizer),
+                    'EleutherAI/gpt-neo-1.3B': (AutoConfig, AutoModelForCausalLM, AutoTokenizer),
+                    'EleutherAI/gpt-neo-2.7B': (AutoConfig, AutoModelForCausalLM, AutoTokenizer),
+                    'EleutherAI/gpt-j-6B': (AutoConfig, AutoModelForCausalLM, AutoTokenizer),
+                    # 'EleutherAI/gpt-neox-20b': (AutoConfig, AutoModelForCausalLM, AutoTokenizer),
                     # 't5-base': (T5Config, T5ForConditionalGeneration, T5Tokenizer),
                     # 't5-small': (T5Config, T5ForConditionalGeneration, T5Tokenizer ),
                     # 't5-large': (T5Config, T5ForConditionalGeneration, T5Tokenizer ),
@@ -808,7 +820,7 @@ def main():
                         help = "Initial Maximum Mean Discrepancy when using PID-controller only")
     parser.add_argument("--latent_dim",
                         type = int,
-                        default = 10,
+                        default = 100,
                         help = "Dimension of the latent space used for computating variational loss")
     parser.add_argument("--return_token_type_ids",
                         action = 'store_true',
@@ -827,7 +839,7 @@ def main():
                         help = "Number of updates steps to accumulate before performing a backward/update pass.")
     parser.add_argument("--save_total_limit",
                         type = int,
-                        default = None,
+                        default = 0,
                         help = "Limit the total amount of checkpoints, delete the older checkpoints in the output_dir, does not delete by default")
     parser.add_argument("--learning_rate", 
                         default = 5e-5,
@@ -868,6 +880,9 @@ def main():
     parser.add_argument("--eval_all_checkpoints", #checck this to know if it is worth evaluating all checkpoints and the significance
                         action = 'store_true',
                         help = "Evaluate all checkpoints starting with the same prefix as model_name ending and ending with step number")
+    parser.add_argument("--delete_model", #checck this to know if it is worth evaluating all checkpoints and the significance
+                        action = 'store_true',
+                        help = "Delete all model from memory.")
     parser.add_argument("--overwrite_output_dir",
                         action = 'store_true',
                         help = "Overwrite the content of the output directory")
@@ -894,7 +909,10 @@ def main():
         else:
             absolute_dir = f'plm/finetuning/{args.year}'
     else:
-        absolute_dir = f'plm/{args.vae_model_name}/{args.year}'
+        if not args.mmd_type:
+            absolute_dir = f'plm/vfinetuning/{args.vae_model_name}/{args.year}'
+        else:
+            absolute_dir = f'plm/vfinetuning/{args.vae_model_name}/{args.mmd_type}/{args.year}'
     #----
     args.output_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.output_dir)
     args.eval_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.eval_dir)
@@ -928,8 +946,8 @@ def main():
     if args.local_rank not in [-1, 0]:
         torch.distributed.barrier()  # Make sure only the first process in distributed training will download model & vocab
     # encoder_decoder_mod = ['bert-base-uncased', 'roberta-large']
-    args.model_type = args.model_type.lower()
-    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]        
+    #args.model_type = args.model_type.lower()
+    config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
                                                 bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
     #---- check if we are using EncoderDecoder Model or not
@@ -974,7 +992,6 @@ def main():
         def __init__(self, args, txt_list, tokenizer, max_length, wts = None, use_weights = False):
             self.input_ids = []
             self.attn_masks = []
-            self.labels = []
             self.wts = wts       #weights GCVAE+GMM...Fixing failure analysis yearly imbalance in dataset
             self.use_weights = use_weights     #probabilistic weights from GCVAE + GMM
             self.token_type_ids = []
@@ -1001,7 +1018,7 @@ def main():
     #-- Probabilistic weights
     z_size = 2
     gcvaemodel = args.mmd_type
-    pl = np.load(join(path, f'b/gcvae/fagcvaegmm/latent_{z_size}/500/{gcvaemodel}/gmm_proba.npy')) #local
+    pl = np.load(join(path, f'b/gcvae/fagcvaegmm/latent_{z_size}/100/{gcvaemodel}/gmm_proba.npy')) #local
     pl = np.max(pl, 1) #returns maximum along horizontal axis...
     if args.use_weights:
         dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length, wts = pl, use_weights = args.use_weights)
@@ -1140,15 +1157,16 @@ def main():
     hyps_and_refs = zip(model_generated_fas, target)
     hyps_and_refs = [x for x in hyps_and_refs if len(x[0]) > 0]
     model_generated_fas, target = zip(*hyps_and_refs)
-    #-------------------------------------------------------------------------------------------------------------
+    #--------------------------------------------------meteor -----------------------------------------------------------
+    logger.info(f"  Average metoer score: {np.mean(meteor_score_s)}")
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
+    logger.info('  **************************************Done computing METEOR score**************************************')
+    #------------------------------------------------Rouge -------------------------------------------------------------
     rouge = Rouge()
     rouge_score = rouge.get_scores(model_generated_fas, target, avg = True)
     logger.info(f'  ROUGE SCORES: {rouge_score}')
     np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_rouge_{len(x_nns)}_{args.num_train_epochs}_{args.year}.npy"), rouge_score)
     logger.info('  ************************************Done computing ROUGE score*****************************************')
-    logger.info(f"  Average metoer score: {np.mean(meteor_score_s)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
-    logger.info('  **************************************Done computing METEOR score**************************************')
     #--- save complete evaluation results in seperate file
     output_eval_file = os.path.join(args.eval_dir, "eval_metric_results.txt")
     with open(output_eval_file, "w+") as writer:
@@ -1163,6 +1181,10 @@ def main():
         writer.write(f"Average metoer score: {np.mean(meteor_score_s)}")
     writer.close()
     logger.info("   ***** Evaluation completed! *****")
+    #if space is a problem --> wipe model & .jsons to save memory space
+    #wipe model and trained parameters from memory
+    if args.delete_model:
+        os.system(f"rm -r {args.output_dir}")
     
 if __name__ == "__main__":
     main()
