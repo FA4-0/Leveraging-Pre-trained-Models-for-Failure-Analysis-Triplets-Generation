@@ -3,6 +3,8 @@ import glob
 import numpy as np
 from os.path import join
 import numpy as np
+import matplotlib.pyplot as plt
+plt.rcParams['text.usetex'] = True
 path = os.getcwd()
 year = 2019
 absoulte_dir = [join(path, f'plm/finetuning/{year}'), join(path, f'plm/use_weight/{year}')]
@@ -77,7 +79,8 @@ print('+------------+-------------+-------------+-------------+-------+------+--
     
 #%% Plotting lossses and perplexity
 
-import matplotlib.pyplot as plt
+
+
 keys_ = [x for x in list(eval_metric.keys()) if not 'w_' in x] # list of model name
 wkeys_ = [x for x in list(eval_metric.keys()) if 'w_' in x] # list of model name
 col = ['red', 'green', 'blue', 'brown', 'purple', 'pink', 'orange']
@@ -87,10 +90,13 @@ ind = {
        'perplexity': 'Perplexity',
        }
 
+char = range(97, 97+len(ind.keys())+1)
 fig, axes = plt.subplots(1, 3, figsize=(8, 3))
 axes = axes.ravel()
 
-for (_, ax), (k, v) in zip(enumerate(axes), ind.items()):
+char = range(97, 97+len(axes)+1)
+
+for (_, ax), (k, v), z in zip(enumerate(axes), ind.items(), char):
     for i, j, w in zip(keys_, wkeys_, col):
         x_ = eval_metric[i] # using the model to extract their dictionary values
         
@@ -98,7 +104,7 @@ for (_, ax), (k, v) in zip(enumerate(axes), ind.items()):
         wx_ = eval_metric[j] # using the model to extract their dictionary values
         ax.plot(range(1, len(x_[ind_])+1), x_[ind_], label = f'{i.upper()}', lw = 1.7, marker='s', c = w) # plot the loss or eval metric
         ax.plot(range(1, len(wx_[ind_])+1), wx_[ind_], label = f'w-{i.upper()}', lw = 1.7, linestyle = '--', marker='o', c = w) # plot the loss or eval metric
-        ax.set_xlabel('epochs', fontsize=20)
+        ax.set_xlabel(f'Number of steps\n\n({chr(z)}) {v}', fontsize=20)
         ax.set_ylabel(f'{v}', fontsize=20)
         ax.legend()
         ax.grid(linewidth=0.2)
@@ -121,13 +127,14 @@ ind = {
        }
 
 
+
 leny_ = len(list(MODEL_CLASSES.values())) #number of models to plot
 lenx_ = len(list(ind.values())) #number of metrics to plot
 fig, ax = plt.subplots(leny_, lenx_, figsize=(8, 3))
 
-
-for en_, (k, v) in enumerate(ind.items()):
-    for (en, _), (i, j) in zip(enumerate(axes), zip(keys_, wkeys_)):
+char = range(97, 97+len(ind.keys())+1)
+for (en_, (k, v)), z in zip(enumerate(ind.items()), char):
+    for (en, _), (i, j) in zip(enumerate(ax), zip(keys_, wkeys_)):
         x_ = eval_metric[i] # using the model to extract their dictionary values
         ind_ = ''.join([x for x in list(x_.keys()) if k in x])
         if ind_ != '':
@@ -136,7 +143,7 @@ for en_, (k, v) in enumerate(ind.items()):
                 ax[en, en_].hist(x_[ind_], bins = 80, label = f'{i.upper()}', alpha = 0.7, color = 'r')
                 ax[en, en_].hist(wx_[ind_], bins = 80, ls='dotted', lw = 1.7, label = f'w-{i.upper()}', alpha = 0.4, color = 'b')
                 anchored_text = AnchoredText(rf'$\mu:{round(np.mean(x_[ind_]), 2)},\ \sigma:{round(np.std(x_[ind_]), 2)}$'+'\n'+\
-                                             rf'$\mu_w:{round(np.mean(wx_[ind_]), 2)},\ \sigma_w:{round(np.std(wx_[ind_]), 2)}$', loc=4, prop={'fontsize':6},
+                                             rf'$\mu_w:{round(np.mean(wx_[ind_]), 2)},\ \sigma_w:{round(np.std(wx_[ind_]), 2)}$', loc=4, prop={'fontsize':5},
                                              frameon=False, )
                 ax[en, en_].add_artist(anchored_text, )
             else:
@@ -144,29 +151,24 @@ for en_, (k, v) in enumerate(ind.items()):
                     ax[en, en_].hist(x_[ind_]['fs_lev'], bins = 80, label = f'{i.upper()}', alpha = 0.7, color = 'r')
                     ax[en, en_].hist(wx_[ind_]['fs_lev'], bins = 80, ls='dotted', lw = 1.7, label = f'w-{i.upper()}', alpha = 0.4, color = 'b')
                     anchored_text = AnchoredText(rf"$\mu={round(np.mean(x_[ind_]['fs_lev']), 2)},\ \sigma={round(np.std(x_[ind_]['fs_lev']), 2)}$"+'\n'+\
-                                             rf"$\mu={round(np.mean(wx_[ind_]['fs_lev']), 2)},\ \sigma={round(np.std(wx_[ind_]['fs_lev']), 2)}$", loc=4, prop={'fontsize':6},
+                                             rf"$\mu_w={round(np.mean(wx_[ind_]['fs_lev']), 2)},\ \sigma_w={round(np.std(wx_[ind_]['fs_lev']), 2)}$", loc=4, prop={'fontsize':5},
                                              frameon=False, )
                     ax[en, en_].add_artist(anchored_text)
                 else:
                     if v == 'ROUGE-1':
                         ax[en, en_].hist(x_[ind_]['rouge-1']['f'], bins = 80, label = f'{i.upper()}', alpha = 0.7, color = 'r')
                         ax[en, en_].hist(wx_[ind_]['rouge-1']['f'], bins = 80, ls='dotted', lw = 1.7, label = f'w-{i.upper()}', alpha = 0.4, color = 'b')
-                        # ax[en, en_].text(60, .025, rf'$\mu={round(np.mean(wx_[ind_]), 2)},\ \sigma={round(np.std(wx_[ind_]), 2)}$')
                     elif v == 'ROUGE-L':
                         ax[en, en_].hist(x_[ind_]['rouge-l']['f'], bins = 80, label = f'{i.upper()}', alpha = 0.7, color = 'r')
                         ax[en, en_].hist(wx_[ind_]['rouge-l']['f'], bins = 80, ls='dotted', lw = 1.7, label = f'w-{i.upper()}', alpha = 0.4, color = 'b')
-                        # ax[en, en_].text(60, .025, rf'$\mu={round(np.mean(wx_[ind_]), 2)},\ \sigma={round(np.std(wx_[ind_]), 2)}$')
         else:
             ax[en, en_].hist(np.array([0]*50), bins = 50, label = f'{i.upper()}', alpha = 0.7, color = 'r')
             ax[en, en_].hist(np.array([0]*50), bins = 80, ls='dotted', lw = 1.7, label = f'w-{i.upper()}', alpha = 0.4, color = 'b')
-            # ax[en, en_].text(60, .025, rf'$\mu={round(np.mean(wx_[ind_]), 2)},\ \sigma={round(np.std(wx_[ind_]), 2)}$')
-        # ax[5, en_].set_title(f'{v}')
-        ax[0, en_].set_title(f'{v}', fontsize=10)
+        ax[len(keys_)-1, en_].set_xlabel(f'Number of steps\n\n({chr(z)}) {v}')
         ax[en, 0].set_ylabel(f'{i.upper()}', fontsize=10)
         ax[en, en_].legend()
         ax[en, en_].grid(linewidth=0.2)
         ax[en, en_].legend(fancybox = False, shadow = False, fontsize = 8)
-
 
 
 
