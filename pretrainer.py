@@ -7,7 +7,6 @@ from torch.nn import CrossEntropyLoss
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-from tensorflow.keras.layers.experimental.preprocessing import TextVectorization
 from features import foi, ic, num, obj, ct, triplets, cl_features, x_n
 import numpy as np
 import os
