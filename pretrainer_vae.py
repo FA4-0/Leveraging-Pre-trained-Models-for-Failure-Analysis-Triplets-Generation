@@ -77,7 +77,8 @@ from torch.utils.data import Dataset, DataLoader, random_split, RandomSampler, S
 from transformers import pipeline, set_seed
 torch.manual_seed(seed_trn)
 #---VAE model------------------------------------
-from vae_pretrainer import VAE
+# from vae_pretrainer import VAE
+from modules import VAE
 #---bleu evaluation------------------------------------
 from bert_score import score as bert_score
 from nltk.translate.bleu_score import sentence_bleu
@@ -95,6 +96,9 @@ logger = logging.getLogger(__name__)
 from utils import (weight_init, calc_iwnll, calc_rec, calc_mi, calc_au, 
                    frange_cycle_linear, frange_cycle_zero_linear)
 
+#---clear cache
+gc.collect()
+torch.cuda.empty_cache()
 #-- set root path
 path = os.getcwd()
 
@@ -397,9 +401,9 @@ def mask_tokens(inputs, tokenizer, args):
 
     # 10% of the time, we replace masked input tokens with random word
     indices_random = torch.bernoulli(torch.full(labels.shape, 0.5)).to(torch.uint8) & masked_indices & ~indices_replaced
-    indices_random = indices_random
-    random_words = torch.randint(len(tokenizer), labels.shape, dtype=torch.long)
-    inputs[indices_random] = random_words[indices_random]
+    indices_random = indices_random.to(args.device)
+    random_words = torch.randint(len(tokenizer), labels.shape, dtype = torch.long)
+    inputs[indices_random] = random_words[indices_random].to(args.device)
 
     # The rest of the time (10% of the time) we keep the masked input tokens unchanged
     return inputs, labels
@@ -551,9 +555,10 @@ def evaluate(args, eval_dataset, model, tokenizer, tokenizer_enc = None, tokeniz
 
 #%% Defining the training loop
 
-def train(args, train_dataset, eval_dataset, model, tokenizer, tokenizer_enc = None, tokenizer_dec = None):
+def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_enc = None, tokenizer_dec = None):
+    tokenizer = tokenizer if tokenizer != None else None
     tokenizer_enc = tokenizer_enc if tokenizer_enc != None else None
-    tokenizer_enc = tokenizer_dec if tokenizer_dec != None else None
+    tokenizer_dec = tokenizer_dec if tokenizer_dec != None else None
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
@@ -582,7 +587,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, tokenizer_enc = N
             # Load in optimizer and scheduler states
             optimizer.load_state_dict(torch.load(os.path.join(args.model_name_or_path, 'optimizer.pt')))
             scheduler.load_state_dict(torch.load(os.path.join(args.model_name_or_path, 'scheduler.pt')))    
-    
+
     #--> numeric precision
     if args.fp16:
         try:
@@ -711,15 +716,15 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, tokenizer_enc = N
             else:
                 #varying beta...
                 beta_t = beta_t_list[step +  epoch*len(epoch_iterator)]
-                model.module.args.beta = beta_t
+                model.args.beta = beta_t
     
                 if beta_t == 0.0:
-                    model.module.args.fb_mode = 0
+                    model.args.fb_mode = 0
                 else:
-                    model.module.args.fb_mode = 1
+                    model.args.fb_mode = 1
                 
                 if args.use_deterministic_connect:
-                    model.module.args.fb_mode = 2
+                    model.args.fb_mode = 2
                 loss_rec, loss_kl, loss = model(inputs, labels) #VAE  LLM
                 
             #------
@@ -735,7 +740,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer, tokenizer_enc = N
                 (
                     f'iter: {step +  epoch*len(epoch_iterator) }; loss: {loss.item():.3f}; '
                     f'loss_rec: {loss_rec.item():.3f}; loss_kl: {loss_kl.item():.3f}; '
-                    f'beta: {model.module.args.beta:.3f}'
+                    f'beta: {model.args.beta:.3f}'
                 )
             )
             if args.gradient_accumulation_steps > 1:
@@ -940,6 +945,7 @@ def main():
                         type = str,
                         required = True,
                         help = "The output directory where the evaluation metrics and losses are stored.")
+    
     #--Variational auto-encoder BERT-GPT2 args
     parser.add_argument("--latent_size", 
                         default = 32, 
@@ -1002,6 +1008,7 @@ def main():
                         help = "Optional input sequence length after tokenization."
                                  "The training dataset will be truncated in block of this size for training."
                                  "Default to the model max input length for single sentence inputs (take into account special tokens).")
+    #---
     parser.add_argument("--seed",
                         type = int,
                         default = 42,
@@ -1148,6 +1155,9 @@ def main():
     parser.add_argument("--use_philly", 
                         action = 'store_true',
                         help = "Use Philly for computing.")
+    parser.add_argument("--length_weighted_loss", 
+                        action = 'store_true',
+                        help = "Normalizing reconstruction loss.")
     parser.add_argument("--use_pretrained_vae", 
                         action = 'store_true',
                         help = "Use use_pretrained_vae as initialization, where beta value is specified in the folder")
@@ -1194,13 +1204,14 @@ def main():
             else:
                 absolute_dir = f'plm/vfinetuning/{args.vae_model_name}/{args.mmd_type}/{args.year}'
         #----
-        args.output_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.output_dir)
-        args.eval_dir = join(join(absolute_dir, args.model_name_or_path.split('/')[0]), args.eval_dir)
+        args.output_dir = join(join(absolute_dir, args.model_name_or_path.split('-')[0]), args.output_dir)
+        args.eval_dir = join(join(absolute_dir, args.model_name_or_path.split('-')[0]), args.eval_dir)
     else:
         absolute_dir = f'plm/encdec/{args.year}'
         #----
-        args.output_dir = join(join(absolute_dir, f"{args.model_type_enc.split('/')[0]}/args.model_type_dec.split('/')[0]"), args.output_dir)
-        args.eval_dir = join(join(absolute_dir, f"{args.model_type_enc.split('/')[0]}/args.model_type_dec.split('/')[0]"), args.eval_dir)
+        args.model_name_or_path = f"{args.model_type_enc.split('-')[0]}{args.model_type_dec.split('-')[0]}"
+        args.output_dir = join(join(absolute_dir, f"{args.model_type_enc.split('-')[0]}{args.model_type_dec.split('-')[0]}"), args.output_dir)
+        args.eval_dir = join(join(absolute_dir, f"{args.model_type_enc.split('-')[0]}{args.model_type_dec.split('-')[0]}"), args.eval_dir)
     #--------------------------------- main
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir) and args.do_train and not args.overwrite_output_dir:
         raise ValueError("Output directory ({}) already exists and is not empty. Use --overwrite_output_dir to overcome.".format(args.output_dir))
@@ -1234,6 +1245,7 @@ def main():
     #args.model_type = args.model_type.lower()
     #---- check if we are using EncoderDecoder Model or not
     if args.encoder_decoder:
+        logging.info('   Loading Tied Encoder-Decoder Model')
         config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
                                                     bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
@@ -1253,6 +1265,7 @@ def main():
         model.config.vocab_size = model.config.decoder.vocab_size
         embedding_size = model.get_input_embeddings().weight.shape[0]
     elif args.encoder_decoder_sep:
+        logging.info('   Loading Seperate Encoder-Decoder Model')
         #---------Encoder
         config_class_enc, model_class_enc, tokenizer_class_enc = MODEL_CLASSES[args.model_type_enc]
         #encoder tokenization...
@@ -1266,6 +1279,7 @@ def main():
                                                     from_tf = bool('.ckpt' in args.model_name_or_path_enc), 
                                                     config = config_enc, 
                                                     latent_size = args.latent_size) #Encoder LM class
+        model_enc.to(args.device) #transfers parameters of encoder to "cuda"
         if args.block_size <= 0:
             args.block_size = tokenizer_enc.max_len_single_sentence  # Our input block size will be the max possible for the model
         args.block_size = min(args.block_size, tokenizer_enc.max_len_single_sentence)
@@ -1292,7 +1306,9 @@ def main():
                                                     latent_size = args.latent_size, 
                                                     latent_as_gpt_emb = latent_as_gpt_emb, 
                                                     latent_as_gpt_memory = latent_as_gpt_memory) #Decoder LM class
+        model_dec.to(args.device) #transfers parameters of decoder to "cuda"
     else:
+        logging.info('   Loading Encoder-only or Decoder-only Model')
         config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
                                                     bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
@@ -1314,7 +1330,8 @@ def main():
         model_dec.resize_token_embeddings(len(tokenizer_dec))  # Notice: resize_token_embeddings expect to receive the full size of the new vocabulary, i.e. the length of the tokenizer.
         assert tokenizer_dec.pad_token == '<PAD>'
         #---- logging ...
-        logging.info(f'  Embedding size: {embedding_size}')
+        # embedding_size = model_dec.get_input_embeddings().weight.shape[0]
+        # logging.info(f'  Embedding size: {embedding_size}')
         model = VAE(model_enc, model_dec, tokenizer_enc, tokenizer_dec, args) #Variational AutoEncoder (VAE) model loading
         logging.info('   Finnished loading Variational model')
         #---- use random initialization weights
@@ -1435,7 +1452,6 @@ def main():
             
     TRAIN_DATA_FILE = join(path, f'combine_corpus_{args.year}.csv')
     df_df = pd.read_csv(TRAIN_DATA_FILE, sep = ',')['text']
-    max_length = max([len(tokenizer.encode(fa)) for fa in df_df])
     
     #-- Probabilistic weights
     z_size = 2
@@ -1443,12 +1459,13 @@ def main():
     pl = np.load(join(path, f'b/gcvae/fagcvaegmm/latent_{z_size}/100/{gcvaemodel}/gmm_proba.npy')) #local
     pl = np.max(pl, 1) #returns maximum along horizontal axis...
     if not args.encoder_decoder_sep:
+        max_length = max([len(tokenizer.encode(fa)) for fa in df_df])
         if args.use_weights:
             dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length, wts = pl, use_weights = args.use_weights)
         else:
             dataset = FailureAnalysisDataset(args, df_df, tokenizer, max_length = max_length)
     else:
-        dataset = TextDataset_2Tokenizers(args, df_df, [tokenizer_enc, tokenizer_class_dec], text_split_mode = 'natural', block_size = 512)
+        dataset = TextDataset_2Tokenizers(args, df_df, [tokenizer_enc, tokenizer_dec], text_split_mode = 'natural', block_size = 512)
     train_size = int(0.7 * len(dataset)) #split data into 70/30 train-test proportion
     train_dataset, eval_dataset = random_split(dataset, [train_size, len(dataset) - train_size]) #validation size = len(dataset) - train_size
     
@@ -1457,11 +1474,20 @@ def main():
     if args.do_train:
         if args.encoder_decoder_sep:
             #--add pretrained Encoder-Decoder to Variational form
-            logger.info("   Loading VAE model...Encoder: {args.model_type_enc}, Decoder: {args.model_type_dec}")
-            global_step, tr_loss, optimizer = train(args, train_dataset, eval_dataset, model, tokenizer_enc, tokenizer_dec) #train_dataloader ==> train-dataset
+            logger.info(f"   Loading VAE model w/ Encoder: {args.model_type_enc}, Decoder: {args.model_type_dec}")
+            global_step, tr_loss, optimizer = train(args, 
+                                                    train_dataset, 
+                                                    eval_dataset, 
+                                                    model, 
+                                                    tokenizer_enc = tokenizer_enc, 
+                                                    tokenizer_dec = tokenizer_dec) #train_dataloader ==> train-dataset
             logger.info(f" Global step = {global_step}, Average loss = {tr_loss}")
         else:
-            global_step, tr_loss = train(args, train_dataset, eval_dataset, model, tokenizer)
+            global_step, tr_loss = train(args, 
+                                         train_dataset, 
+                                         eval_dataset, 
+                                         model, 
+                                         tokenizer = tokenizer)
             logger.info(f" Global step = {global_step}, Average loss = {tr_loss}")
 
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
@@ -1574,15 +1600,15 @@ def main():
     less_scores_1 = {'lev_d': lev_d_1, 'prec_lev': prec_lev_1, 'rec_lev': rec_lev_1, 'fs_lev': fs_lev_1} #LESE-1 ..variable name is lese_scores_1 not *less*
     less_scores = {'lev_d': lev_d, 'prec_lev': prec_lev, 'rec_lev': rec_lev, 'fs_lev': fs_lev} #LESE-3
     logger.info(f"  Average blue-1 score: {np.mean(bluescore)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_bleuscore_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('-')[0]}_bleuscore_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore)
     logger.info('  *********************************Done computing self-BELU score*********************************')
     logger.info(f"  Average blue-3 score: {np.mean(bluescore_3)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_bleuscore3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore_3)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('-')[0]}_bleuscore3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), bluescore_3)
     logger.info('  *********************************Done computing self-BELU score**********************************************')
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_lese1_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores_1)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('-')[0]}_lese1_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores_1)
     logger.info(f'  LESE Precision: {np.mean(prec_lev_1)}\nLESE Recall: {np.mean(rec_lev_1)}\nLESE F1-score: {np.mean(fs_lev_1)}')
     logger.info('   ****************************************Done computing LESE score**********************************************')
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_lese3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('-')[0]}_lese3_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), less_scores)
     logger.info(f'  LESE Precision: {np.mean(prec_lev)}\nLESE Recall: {np.mean(rec_lev)}\nLESE F1-score: {np.mean(fs_lev)}')
     logger.info('   *************************************Done computing LESE score***********************************************')
     #------------------ Remove empty/null hypothesis before computing ROUGE and METEOR scores -------------------------
@@ -1591,13 +1617,13 @@ def main():
     model_generated_fas, target = zip(*hyps_and_refs)
     #--------------------------------------------------meteor -----------------------------------------------------------
     logger.info(f"  Average metoer score: {np.mean(meteor_score_s)}")
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('-')[0]}_meteor_{len(x_n)}_{args.num_train_epochs}_{args.year}.npy"), meteor_score_s)
     logger.info('  **************************************Done computing METEOR score**************************************')
     #------------------------------------------------Rouge -------------------------------------------------------------
     rouge = Rouge()
     rouge_score = rouge.get_scores(model_generated_fas, target, avg = True)
     logger.info(f'  ROUGE SCORES: {rouge_score}')
-    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('/')[0]}_rouge_{len(x_nns)}_{args.num_train_epochs}_{args.year}.npy"), rouge_score)
+    np.save(os.path.join(args.eval_dir, f"pt_{args.model_name_or_path.split('-')[0]}_rouge_{len(x_nns)}_{args.num_train_epochs}_{args.year}.npy"), rouge_score)
     logger.info('  ************************************Done computing ROUGE score*****************************************')
     #--- save complete evaluation results in seperate file
     output_eval_file = os.path.join(args.eval_dir, "eval_metric_results.txt")
