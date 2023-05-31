@@ -54,18 +54,18 @@ from torch.utils.tensorboard import SummaryWriter
 #from pytorchtools import EarlyStopping
 import torch.nn.init as init
 from torch.utils.data import Dataset, random_split
-# from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
-#                             AutoTokenizer, AutoModelForCausalLM, AutoConfig,
-#                             GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
-#                             BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
-#                             RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, RobertaForMaskedLM, #Roberta Model #---
-#                             XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
-#                             XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
-#                             TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
-#                             OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
-#                             BartTokenizer, BartForConditionalGeneration, BartConfig, #---
-#                             T5Tokenizer, T5ForConditionalGeneration, T5Config,
-#                             )
+from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
+                            AutoTokenizer, AutoModelForCausalLM, AutoConfig,
+                            GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
+                            BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
+                            RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, RobertaForMaskedLM, #Roberta Model #---
+                            XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
+                            XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
+                            TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
+                            OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
+                            BartTokenizer, BartForConditionalGeneration, BartConfig, #---
+                            T5Tokenizer, T5ForConditionalGeneration, T5Config,
+                            )
 from pytorch_transformers import (WEIGHTS_NAME, AdamW, WarmupLinearSchedule,
                                   BertConfig, BertForLatentConnector, BertTokenizer,
                                   GPT2Config, GPT2ForLatentConnector, GPT2Tokenizer,
@@ -846,23 +846,56 @@ def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_
         np.save(join(args.eval_dir, 'evaluation_loss.npy'), avg_eval_loss.cpu() if not isinstance(avg_eval_loss, list) else avg_eval_loss) #final evluation loss
         np.save(join(args.eval_dir, 'training_kl.npy'), avg_kl.cpu() if not isinstance(avg_kl, list) else avg_kl) #final training kl-divergence loss
         np.save(join(args.eval_dir, 'training_rec.npy'), avg_rec.cpu() if not isinstance(avg_rec, list) else avg_rec) #final training reconstruction loss
-    #-----save model
-    if args.local_rank in [-1, 0]:
-        # Save model checkpoint
-        output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        model_to_save = model.module if hasattr(model, 'module') else model
-        model_to_save.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
+        
+    #--Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
+    if args.do_train and args.local_rank in [-1, 0]:
+        if not args.encoder_decoder_sep:
+            # Save model checkpoint
+            output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            model_to_save = model.module if hasattr(model, 'module') else model
+            model_to_save.save_pretrained(output_dir)
+            tokenizer.save_pretrained(output_dir)
+    
+            torch.save(args, os.path.join(output_dir, 'training_args.bin'))
+            logger.info(f"  Saving model checkpoint to {output_dir}")
+    
+            _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint')
+            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+            logger.info("  Saving optimizer and scheduler states to {output_dir}")
+        else:
+            output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
+            args.output_encoder_dir = os.path.join(args.output_dir, 'checkpoint-encoder-{}'.format(global_step))
+            args.output_decoder_dir = os.path.join(args.output_dir, 'checkpoint-decoder-{}'.format(global_step))
+            if not os.path.exists(args.output_encoder_dir) and args.local_rank in [-1, 0]:
+                os.makedirs(args.output_encoder_dir)
+            if not os.path.exists(args.output_decoder_dir) and args.local_rank in [-1, 0]:
+                os.makedirs(args.output_decoder_dir)
+            #-- savingoptimizer and scheduler
+            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
+            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
+            #--
+            # logger.info("Saving encoder and decoder tokenizers")
+            # tokenizer_enc.save_pretrained(args.output_encoder_dir)
+            # tokenizer_dec.save_pretrained(args.output_decoder_dir)
+            
+            logger.info(f"Saving encoder model checkpoint to {args.output_encoder_dir}")
+            logger.info(f"Saving decoder model checkpoint to {args.output_decoder_dir}")
+            # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+            # They can then be reloaded using `from_pretrained()`
+    
+            model_encoder_to_save = model.module.encoder if hasattr(model, 'module') else model.encoder  # Take care of distributed/parallel training
+            model_decoder_to_save = model.module.decoder if hasattr(model, 'module') else model.decoder  # Take care of distributed/parallel training
+            #--save finetuned encoder
+            model_encoder_to_save.save_pretrained(args.output_encoder_dir)
+            torch.save(args, os.path.join(args.output_encoder_dir, 'training_encoder_args.bin'))
+            #--save finetuned decoder
+            model_decoder_to_save.save_pretrained(args.output_decoder_dir)
+            torch.save(args, os.path.join(args.output_decoder_dir, 'training_encoder_args.bin'))
+            
 
-        torch.save(args, os.path.join(output_dir, 'training_args.bin'))
-        logger.info(f"  Saving model checkpoint to {output_dir}")
-
-        _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint')
-        torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-        torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-        logger.info("  Saving optimizer and scheduler states to {output_dir}")
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
@@ -1504,25 +1537,20 @@ def main():
 
     # Saving best-practices: if you use defaults names for the model, you can reload it using from_pretrained()
     if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        # Create output directory if needed
-        if not os.path.exists(args.output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(args.output_dir)
-
-        logger.info("Saving model checkpoint to %s", args.output_dir)
-        # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-        # They can then be reloaded using `from_pretrained()`
-        model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
-        model_to_save.save_pretrained(args.output_dir)
-        tokenizer.save_pretrained(args.output_dir)
-
-        # Good practice: save your training arguments together with the trained model
-        torch.save(args, os.path.join(args.output_dir, 'training_args.bin'))
-
-        # Load a trained model and vocabulary that you have fine-tuned
-        model = model_class.from_pretrained(args.output_dir)
-        tokenizer = tokenizer_class.from_pretrained(args.output_dir)
-        model.to(args.device)
-
+        if not args.encoder_decoder_sep:
+            # Load a trained model and vocabulary that you have fine-tuned
+            model = model_class.from_pretrained(args.output_dir)
+            tokenizer = tokenizer_class.from_pretrained(args.output_dir)
+            model.to(args.device)
+        else:
+            # Load a trained model and vocabulary that you have fine-tuned
+            model_enc = model_enc.from_pretrained(args.output_encoder_dir, latent_size = args.latent_size)
+            model_enc.to(args.device)
+    
+            # Load a trained model and vocabulary that you have fine-tuned
+            model_dec = model_dec.from_pretrained(args.output_decoder_dir, latent_size = args.latent_size)
+            model_dec.to(args.device)
+            
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     if args.do_eval and args.local_rank in [-1, 0]:
         checkpoints = [args.output_dir]
@@ -1577,17 +1605,30 @@ def main():
         logger.info(f'Failure description: {ii}\n')
         logger.info(f'Expert FA: {ij}\n')
         start_prompt = ii
-        # start_prompt = 'data castelletto customer manufacturing limit axis analysis failure complaint failed thd abnormal'
-        start_tokens = tokenizer(start_prompt, return_tensors="pt").input_ids.to(device)
-        sampled_generated_outputs_token = model.generate(start_tokens, do_sample = True, top_k = 10, max_length = max_length, top_p = 0.95, 
-                                                         temperature = 1.9, num_return_sequences = 1, pad_token_id = tokenizer.eos_token_id
-                                                         )
-        generated_text_is = []
-        for _, s_output in enumerate(sampled_generated_outputs_token):
-            logger.info(f"AI generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
-            generated_text_is.append(tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
-        prediction = " ".join(generated_text_is).lower()
-        model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
+        if not args.encoder_decoder_sep:
+            # start_prompt = 'data castelletto customer manufacturing limit axis analysis failure complaint failed thd abnormal'
+            start_tokens = tokenizer(start_prompt, return_tensors="pt").input_ids.to(device)
+            sampled_generated_outputs_token = model.generate(start_tokens, do_sample = True, top_k = 10, max_length = max_length, top_p = 0.95, 
+                                                             temperature = 1.9, num_return_sequences = 1, pad_token_id = tokenizer.eos_token_id
+                                                             )
+            generated_text_is = []
+            for _, s_output in enumerate(sampled_generated_outputs_token):
+                logger.info(f"AI generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
+                generated_text_is.append(tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
+            prediction = " ".join(generated_text_is).lower()
+            model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
+        else:
+            # start_prompt = 'data castelletto customer manufacturing limit axis analysis failure complaint failed thd abnormal'
+            start_tokens = tokenizer_dec(start_prompt, return_tensors="pt").input_ids.to(device)
+            sampled_generated_outputs_token = model_dec.generate(start_tokens, do_sample = True, top_k = 10, max_length = max_length, top_p = 0.95, 
+                                                             temperature = 1.9, num_return_sequences = 1, pad_token_id = tokenizer.eos_token_id
+                                                             )
+            generated_text_is = []
+            for _, s_output in enumerate(sampled_generated_outputs_token):
+                logger.info(f"AI generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
+                generated_text_is.append(tokenizer_dec.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
+            prediction = " ".join(generated_text_is).lower()
+            model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
         #--------------------
         #bleu score
         chencherry = SmoothingFunction()
