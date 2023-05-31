@@ -54,18 +54,18 @@ from torch.utils.tensorboard import SummaryWriter
 #from pytorchtools import EarlyStopping
 import torch.nn.init as init
 from torch.utils.data import Dataset, random_split
-from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
-                            AutoTokenizer, AutoModelForCausalLM, AutoConfig,
-                            GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
-                            BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
-                            RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, RobertaForMaskedLM, #Roberta Model #---
-                            XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
-                            XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
-                            TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
-                            OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
-                            BartTokenizer, BartForConditionalGeneration, BartConfig, #---
-                            T5Tokenizer, T5ForConditionalGeneration, T5Config,
-                            )
+# from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
+#                             AutoTokenizer, AutoModelForCausalLM, AutoConfig,
+#                             GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
+#                             BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
+#                             RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, RobertaForMaskedLM, #Roberta Model #---
+#                             XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
+#                             XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
+#                             TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
+#                             OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
+#                             BartTokenizer, BartForConditionalGeneration, BartConfig, #---
+#                             T5Tokenizer, T5ForConditionalGeneration, T5Config,
+#                             )
 from pytorch_transformers import (WEIGHTS_NAME, AdamW, WarmupLinearSchedule,
                                   BertConfig, BertForLatentConnector, BertTokenizer,
                                   GPT2Config, GPT2ForLatentConnector, GPT2Tokenizer,
@@ -418,10 +418,11 @@ def weights_init_rondom(model):
         
 #%% Evaluation function
 
-def evaluate(args, eval_dataset, model, tokenizer, tokenizer_enc = None, tokenizer_dec = None, prefix=""):
+def evaluate(args, eval_dataset, model, tokenizer = None, tokenizer_enc = None, tokenizer_dec = None, prefix=""):
     eval_output_dir = args.eval_dir
+    tokenizer = tokenizer if tokenizer != None else None
     tokenizer_enc = tokenizer_enc if tokenizer_enc != None else None
-    tokenizer_enc = tokenizer_dec if tokenizer_dec != None else None
+    tokenizer_dec = tokenizer_dec if tokenizer_dec != None else None
 
     if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
         os.makedirs(eval_output_dir)
@@ -436,7 +437,7 @@ def evaluate(args, eval_dataset, model, tokenizer, tokenizer_enc = None, tokeniz
         model = torch.nn.DataParallel(model)
 
     # Evaluation!
-    logger.info("   ***** Running evaluation {} *****".format(prefix))
+    logger.info(f"\n   ***** Running evaluation {prefix} *****")
     logger.info(f"  Num examples = {len(eval_dataset)}")
     logger.info(f"  Batch size = {args.eval_batch_size}")
     eval_loss, perplexity = 0.0, 0.0
@@ -499,7 +500,14 @@ def evaluate(args, eval_dataset, model, tokenizer, tokenizer_enc = None, tokeniz
                     tmp_eval_loss, bce, kld, alpha, beta, gamma = variational_loss(logits, inputs['labels'], model, args)
             else:
                 #---
-                loss_rec, loss_kl, loss = model(inputs, labels) #VAE  LLM        
+                if model.args.beta == 0.0:
+                    model.args.fb_mode = 0
+                else:
+                    model.args.fb_mode = 1
+                #---
+                if args.use_deterministic_connect:
+                    model.args.fb_mode = 2
+                loss_rec, loss_kl, loss = model(inputs, labels) #VAE  LLM
                 
             #--compute averages...
             if not args.encoder_decoder_sep:
@@ -515,7 +523,7 @@ def evaluate(args, eval_dataset, model, tokenizer, tokenizer_enc = None, tokeniz
                     perplexity += avg_templ_ppl #
             else:
                 avg_tmp_eval_loss = loss.mean().item() #average batch evaluation loss
-                avg_templ_ppl = torch.exp(avg_tmp_eval_loss) #average batch perplexity
+                avg_templ_ppl =torch.exp(torch.tensor(avg_tmp_eval_loss).to(args.device)) #average batch perplexity
                 avg_templ_rec = loss_rec.mean().item() #average reconstruction loss
                 avg_templ_kl = loss_kl.mean().item() #average KL loss
                 eval_loss += avg_tmp_eval_loss #total inreamental loss
@@ -774,7 +782,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_
                     torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args.max_grad_norm)
                 else:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-
+                #---
                 optimizer.step()
                 scheduler.step()
                 model.zero_grad()
@@ -806,7 +814,11 @@ def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_
         if args.local_rank in [-1, 0]:
             # Log metrics
             if args.local_rank == -1 and args.evaluate_during_training:
-                eval_loss, ppl = evaluate(args, eval_dataset, model, tokenizer) #evaluation here
+                eval_loss, ppl = evaluate(args, 
+                                          eval_dataset, 
+                                          model, 
+                                          tokenizer_enc = tokenizer_enc, 
+                                          tokenizer_dec = tokenizer_dec) #evaluation here
                 avg_eval_loss.append(eval_loss)
                 avg_ppl.append(ppl)
                 logger.info(f'Train loss: {tr_loss_tmp} Eval loss: {eval_loss} Perplexity: {ppl}')
