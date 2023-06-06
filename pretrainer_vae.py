@@ -44,7 +44,7 @@ from multiprocessing.dummy import Pool as ThreadPool
 from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 # from Similarity import similarity as sm
-from collections import Counter
+from collections import Counter, defaultdict
 from sklearn.preprocessing import StandardScaler
 from nltk.tokenize import RegexpTokenizer
 from nltk.stem.snowball import FrenchStemmer, PorterStemmer, ItalianStemmer
@@ -414,8 +414,275 @@ def weights_init_rondom(model):
     for key in model_state_dict:
         if 'encoder' in key:
             init.normal_(model_state_dict[key].data)  
+     
+
+def evaluate_generation_from_gpt2(model, decoder_tokenizer, args):
+    context_tokens = decoder_tokenizer.encode('<BOS>')
+    with torch.no_grad():
+        out = sample_sequence(
+                            model=model,
+                            context=context_tokens,
+                            length=args.max_seq_length, # Chunyuan: Fix length; or use <EOS> to complete a sentence
+                            temperature=args.temperature,
+                            top_k=args.top_k,
+                            top_p=args.top_p,
+                            device=args.device,
+                            decoder_tokenizer = decoder_tokenizer, 
+                            max_seq_length = args.max_seq_length
+                        )
+        text = decoder_tokenizer.decode(out[0,:].tolist(), clean_up_tokenization_spaces=True)
+        text = text.split()[1:-1]
+        text = ' '.join(text) + '\n'
+
+    return text
+
+
+def evaluate_generation_fromp_prior(model_vae, decoder_tokenizer, args):
+    loc = torch.zeros([args.nz]).to(args.device)
+    scale = torch.ones([args.nz]).to(args.device)
+    prior = torch.distributions.normal.Normal(loc, scale)
+    
+    context_tokens = decoder_tokenizer.encode('<BOS>')
+
+    with torch.no_grad():
+        latent_z = prior.sample()
+        # pdb.set_trace()
+        past = model_vae.decoder.linear(latent_z.unsqueeze(0))
         
+        # pdb.set_trace()
+        out = sample_sequence_conditional(
+                                        model=model_vae.decoder,
+                                        context=context_tokens,
+                                        past=past,
+                                        length=args.max_seq_length, # Chunyuan: Fix length; or use <EOS> to complete a sentence
+                                        temperature=args.temperature,
+                                        top_k=args.top_k,
+                                        top_p=args.top_p,
+                                        device=args.device,
+                                        decoder_tokenizer = decoder_tokenizer, 
+                                        max_seq_length = args.max_seq_length
+                                    )
+        text = decoder_tokenizer.decode(out[0,:].tolist(), clean_up_tokenization_spaces=True)
+        text = text.split()[1:-1]
+        text = ' '.join(text) + '\n'
+    return text
+
+
+def save_checkpoint(model, optimizer, global_step, tokenizer_enc, tokenizer_dec, args):
+    # Create output directory if needed
+    # Save model checkpoint
+    args.output_encoder_dir = os.path.join(args.output_dir, 'checkpoint-encoder-{}'.format(global_step))
+    args.output_decoder_dir = os.path.join(args.output_dir, 'checkpoint-decoder-{}'.format(global_step))
+    args.output_full_dir = os.path.join(args.output_dir, 'checkpoint-full-{}'.format(global_step))
+    if not os.path.exists(args.output_encoder_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(args.output_encoder_dir)
+    if not os.path.exists(args.output_decoder_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(args.output_decoder_dir)
+    #--
+    logger.info("   Saving encoder model checkpoint to %s", args.output_encoder_dir)
+    logger.info("   Saving decoder model checkpoint to %s", args.output_decoder_dir)
+    
+    # #-- savingoptimizer and scheduler
+    # torch.save(optimizer.state_dict(), os.path.join(args.output_dir, "optimizer.pt"))
+    # torch.save(scheduler.state_dict(), os.path.join(args.output_dir, "scheduler.pt"))
+    
+    # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+    # They can then be reloaded using `from_pretrained()`
+    model_encoder_to_save = model.module.encoder if hasattr(model, 'module') else model.encoder  # Take care of distributed/parallel training
+    model_decoder_to_save = model.module.decoder if hasattr(model, 'module') else model.decoder  # Take care of distributed/parallel training
+    
+    logger.info("   Saving encoder and decoder tokenizers")
+    tokenizer_enc.save_pretrained(args.output_encoder_dir)
+    tokenizer_dec.save_pretrained(args.output_decoder_dir)
+    
+    # Good practice: save your training arguments together with the trained model
+    model_encoder_to_save.save_pretrained(args.output_encoder_dir)
+    torch.save(args, os.path.join(args.output_encoder_dir, 'training_encoder_args.bin'))
+
+    model_decoder_to_save.save_pretrained(args.output_decoder_dir)
+    torch.save(args, os.path.join(args.output_decoder_dir, 'training_decoder_args.bin'))
+
+    # save the full model and optmizer into a checkpoint
+    model_to_save = model.module if hasattr(model, 'module') else model  # Take care of distributed/parallel training
+
+    checkpoint = {
+                    'iter': global_step,
+                    'model_state_dict': model_to_save.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'beta': model_to_save.args.beta,
+                    'args': args
+                    }
+
+    if not os.path.exists(args.output_full_dir) and args.local_rank in [-1, 0]:
+        os.makedirs(args.output_full_dir)
+
+    logger.info("   Start saving full model checkpoint to %s", args.output_full_dir)
+    torch.save(checkpoint, os.path.join(args.output_full_dir, 'training.bin'))
+    logger.info("   Saving full checkpoint to %s", args.output_full_dir)
         
+  
+def load_checkpoint(args, MODEL_CLASSES, loading_step = None):
+    #     global_step = args.gloabl_step_eval
+    # else:
+    #     global_step = args.gloabl_step_eval
+
+    checkpoints = [ [args.output_encoder_dir, args.output_decoder_dir] ]
+    logger.info("   Evaluate the following checkpoints: %s", checkpoints)
+    
+    # Load a trained Encoder model and vocabulary
+    #---------Encoder
+    config_class_enc, model_class_enc, tokenizer_class_enc = MODEL_CLASSES[args.model_type_enc]
+    #encoder tokenization...load from checkpoint
+    tokenizer_enc = tokenizer_class_enc.from_pretrained(args.output_encoder_dir) #Tokenization
+    # config_enc = config_class_enc.from_pretrained(args.config_name_enc if args.config_name_enc else args.model_name_or_path_enc)
+    model_enc = model_class_enc.from_pretrained(args.output_encoder_dir, 
+                                                latent_size = args.latent_size) #Encoder LM class
+    model_enc.to(args.device)
+    if args.block_size <= 0:
+        args.block_size = tokenizer_enc.max_len_single_sentence  # Our input block size will be the max possible for the model
+    args.block_size = min(args.block_size, tokenizer_enc.max_len_single_sentence)
+    
+    # Load a trained Decoder model and vocabulary
+    #---------Decoder
+    config_class_dec, model_class_dec, tokenizer_class_dec = MODEL_CLASSES[args.model_type_dec]
+    #decoder tokenization...
+    tokenizer_dec = tokenizer_class_dec.from_pretrained(args.output_decoder_dir) #Tokenization
+    # config_dec = config_class_dec.from_pretrained(args.config_name_dec if args.config_name_dec else args.model_name_or_path_dec)
+    model_dec = model_class_dec.from_pretrained(args.output_decoder_dir, 
+                                                latent_size = args.latent_size) #Decoder LM class
+    model_dec.to(args.device)
+    if args.block_size <= 0:
+        args.block_size = tokenizer_dec.max_len_single_sentence  # Our input block size will be the max possible for the model
+    args.block_size = min(args.block_size, tokenizer_dec.max_len_single_sentence)
+    
+    #--Adding special tokens to GPTx
+    special_tokens_dict = {'pad_token': '<PAD>', 'bos_token': '<BOS>', 'eos_token': '<EOS>'}
+    num_added_toks = tokenizer_dec.add_special_tokens(special_tokens_dict)
+    logger.info('   We have added', num_added_toks, 'tokens to GPT2')
+    model_dec.resize_token_embeddings(len(tokenizer_dec))  # Notice: resize_token_embeddings expect to receive the full size of the new vocabulary, i.e. the length of the tokenizer.
+    assert tokenizer_dec.pad_token == '<PAD>'
+    
+    # Load full VAE (BERT/RoBERTa/BART <-> GPTx) model
+    checkpoint = torch.load(os.path.join(args.output_full_dir, 'training.bin'))
+    model = VAE(model_enc, model_dec, tokenizer_enc, tokenizer_dec, args)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    logger.info("Pre-trained Opti-style model is successfully loaded")
+    model.to(args.device)
+    
+    
+def top_k_top_p_filtering(logits, top_k = 0, top_p = 0.0, filter_value = -float('Inf')):
+    """ Filter a distribution of logits using top-k and/or nucleus (top-p) filtering
+        Args:
+            logits: logits distribution shape (vocabulary size)
+            top_k > 0: keep only top k tokens with highest probability (top-k filtering).
+            top_p > 0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
+                Nucleus filtering is described in Holtzman et al. (http://arxiv.org/abs/1904.09751)
+        From: https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317
+    """
+    assert logits.dim() == 1  # batch size 1 for now - could be updated for more but the code would be less clear
+    top_k = min(top_k, logits.size(-1))  # Safety check
+    if top_k > 0:
+        # Remove all tokens with a probability less than the last token of the top-k
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = filter_value
+
+    if top_p > 0.0:
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        indices_to_remove = sorted_indices[sorted_indices_to_remove]
+        logits[indices_to_remove] = filter_value
+    return logits
+
+
+def sample_sequence(model, length, context, num_samples = 1, temperature = 1, top_k = 0, top_p= 0.0, is_xlnet = False, device = 'cpu'):
+    context = torch.tensor(context, dtype=torch.long, device=device)
+    context = context.unsqueeze(0).repeat(num_samples, 1)
+    generated = context
+    with torch.no_grad():
+        for _ in trange(length):
+            inputs = {'input_ids': generated}
+            if is_xlnet: 
+                # XLNet is a direct (predict same token, not next token) and bi-directional model by default
+                # => need one additional dummy token in the input (will be masked), attention mask and target mapping (see model docstring)
+                input_ids = torch.cat((generated, torch.zeros((1, 1), dtype=torch.long, device=device)), dim=1)
+                perm_mask = torch.zeros((1, input_ids.shape[1], input_ids.shape[1]), dtype=torch.float, device=device)
+                perm_mask[:, :, -1] = 1.0  # Previous tokens don't see last token
+                target_mapping = torch.zeros((1, 1, input_ids.shape[1]), dtype=torch.float, device=device)
+                target_mapping[0, 0, -1] = 1.0  # predict last token
+                inputs = {'input_ids': input_ids, 'perm_mask': perm_mask, 'target_mapping': target_mapping}
+
+            outputs = model(**inputs)  # Note: we could also use 'past' with GPT-2/Transfo-XL/XLNet (cached hidden-states)
+            next_token_logits = outputs[0][0, -1, :] / temperature
+            filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=top_k, top_p=top_p)
+            next_token = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+            generated = torch.cat((generated, next_token.unsqueeze(0)), dim=1)
+    return generated
+
+
+def sample_sequence_conditional(model, length, context, past = None, num_samples = 1, temperature = 1, top_k = 0, top_p = 0.0, device = 'cpu', decoder_tokenizer = None, max_seq_length = -1):
+    context = torch.tensor(context, dtype=torch.long, device=device)
+    context = context.unsqueeze(0).repeat(num_samples, 1)
+    generated = context
+    gen_seq_length = 0
+    with torch.no_grad():
+        while True:
+            inputs = {'input_ids': generated, 'past': past}
+            outputs = model(**inputs)  # Note: we could also use 'past' with GPT-2/Transfo-XL/XLNet (cached hidden-states)
+            next_token_logits = outputs[0][0, -1, :] / temperature
+            filtered_logits = top_k_top_p_filtering(next_token_logits, top_k=top_k, top_p=top_p)
+            next_token = torch.multinomial(F.softmax(filtered_logits, dim=-1), num_samples=1)
+            generated = torch.cat((generated, next_token.unsqueeze(0)), dim=1)
+            gen_seq_length += 1
+            # pdb.set_trace()
+            if next_token.unsqueeze(0)[0,0].item() == decoder_tokenizer.encode('<EOS>')[0]:
+                break
+            if max_seq_length>0 and gen_seq_length>max_seq_length:
+                break
+    return generated
+
+        
+def latent_code_from_text(text, tokenizer_encoder, model_vae, args):
+    tokenized1 = tokenizer_encoder.encode(text)
+    tokenized1 = [101] + tokenized1 + [102]
+    coded1 = torch.Tensor([tokenized1])
+    coded1 = torch.Tensor.long(coded1)
+    with torch.no_grad():
+        x0 = coded1
+        x0 = x0.to(args.device)
+        pooled_hidden_fea = model_vae.encoder(x0, attention_mask=(x0 > 0).float())[1]
+        mean, logvar = model_vae.encoder.linear(pooled_hidden_fea).chunk(2, -1)
+        latent_z = mean.squeeze(1)  
+        coded_length = len(tokenized1)
+        return latent_z, coded_length
+
+def latent_code_to_text(latent_z, tokenizer_decoder, model_vae, args):
+    past = latent_z
+    context_tokens = tokenizer_decoder.encode('<BOS>')
+
+    length = 128 # maximum length, but not used 
+    out = sample_sequence_conditional(
+                                    model = model_vae.decoder,
+                                    context = context_tokens,
+                                    past = past,
+                                    length = length, # Chunyuan: Fix length; or use <EOS> to complete a sentence
+                                    temperature = args.temperature,
+                                    top_k = args.top_k, #must be integer
+                                    top_p = args.top_p,
+                                    device = args.device,
+                                    decoder_tokenizer = tokenizer_decoder
+                                )
+    text_x1 = tokenizer_decoder.decode(out[0,:].tolist(), clean_up_tokenization_spaces = True)
+    text_x1 = text_x1.split()[1:-1]
+    text_x1 = ' '.join(text_x1)
+    return text_x1
+
 #%% Evaluation function
 
 def evaluate(args, eval_dataset, model, tokenizer = None, tokenizer_enc = None, tokenizer_dec = None, prefix=""):
@@ -561,6 +828,7 @@ def evaluate(args, eval_dataset, model, tokenizer = None, tokenizer_enc = None, 
     
     return eval_loss, perplexity
 
+
 #%% Defining the training loop
 
 def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_enc = None, tokenizer_dec = None):
@@ -672,9 +940,8 @@ def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_
             batch = tuple(t.to(args.device) for t in batch)
             if args.encoder_decoder_sep:
                 tokenized_text0, tokenized_text1, tokenized_text_lengths = batch #returns encoder_tokens, decoder_tokens, _ 
-                inputs, labels = mask_tokens(tokenized_text0, tokenizer_enc, args) if args.mlm else (tokenized_text0, tokenized_text1)
-                labels = tokenized_text1
-                # tokenized_text1 = tokenized_text1.to(args.device)
+                inputs, labels = mask_tokens(tokenized_text0, tokenizer_enc, args) if args.mlm else (tokenized_text0, tokenized_text1) #the label is the encoding of GPTx
+                labels = tokenized_text1 #the label is the encoding of GPTx
                 inputs = inputs.to(args.device)
                 labels = labels.to(args.device)
             else:
@@ -866,36 +1133,7 @@ def train(args, train_dataset, eval_dataset, model, tokenizer = None, tokenizer_
             torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
             logger.info("  Saving optimizer and scheduler states to {output_dir}")
         else:
-            output_dir = os.path.join(args.output_dir, f'checkpoint-{global_step}')
-            args.output_encoder_dir = os.path.join(args.output_dir, 'checkpoint-encoder-{}'.format(global_step))
-            args.output_decoder_dir = os.path.join(args.output_dir, 'checkpoint-decoder-{}'.format(global_step))
-            if not os.path.exists(args.output_encoder_dir) and args.local_rank in [-1, 0]:
-                os.makedirs(args.output_encoder_dir)
-            if not os.path.exists(args.output_decoder_dir) and args.local_rank in [-1, 0]:
-                os.makedirs(args.output_decoder_dir)
-            #-- savingoptimizer and scheduler
-            torch.save(optimizer.state_dict(), os.path.join(output_dir, "optimizer.pt"))
-            torch.save(scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
-            #--
-            # logger.info("Saving encoder and decoder tokenizers")
-            # tokenizer_enc.save_pretrained(args.output_encoder_dir)
-            # tokenizer_dec.save_pretrained(args.output_decoder_dir)
-            
-            logger.info(f"Saving encoder model checkpoint to {args.output_encoder_dir}")
-            logger.info(f"Saving decoder model checkpoint to {args.output_decoder_dir}")
-            # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-            # They can then be reloaded using `from_pretrained()`
-    
-            model_encoder_to_save = model.module.encoder if hasattr(model, 'module') else model.encoder  # Take care of distributed/parallel training
-            model_decoder_to_save = model.module.decoder if hasattr(model, 'module') else model.decoder  # Take care of distributed/parallel training
-            #--save finetuned encoder
-            model_encoder_to_save.save_pretrained(args.output_encoder_dir)
-            torch.save(args, os.path.join(args.output_encoder_dir, 'training_encoder_args.bin'))
-            #--save finetuned decoder
-            model_decoder_to_save.save_pretrained(args.output_decoder_dir)
-            torch.save(args, os.path.join(args.output_decoder_dir, 'training_encoder_args.bin'))
-            
-
+            save_checkpoint(model, optimizer, global_step, tokenizer_enc, tokenizer_dec, args)
 
     if args.local_rank in [-1, 0]:
         tb_writer.close()
@@ -1136,7 +1374,19 @@ def main():
     parser.add_argument("--ratio_zero", 
                         default = 0.25, 
                         type = float,
-                        help = "Learning schedule, the percentage for the pure auto-encoding stage.")     
+                        help = "Learning schedule, the percentage for the pure auto-encoding stage.")
+    parser.add_argument("--temperature", 
+                        default = 1.9, 
+                        type = float,
+                        help = "Temprature parameter reduces hallucination .")
+    parser.add_argument("--top_k", 
+                        default = 10,
+                        type = int,
+                        help = "Selectt Top-k (usually integer) generated next tokens")
+    parser.add_argument("--top_p", 
+                        default = 0.95, 
+                        type = float,
+                        help = "Similar to Top-k paprameter. Selects keywords above predefined probability threshold p.")
     parser.add_argument("--fb_mode", 
                         default = 0, 
                         type = int,
@@ -1290,7 +1540,7 @@ def main():
     #args.model_type = args.model_type.lower()
     #---- check if we are using EncoderDecoder Model or not
     if args.encoder_decoder:
-        logging.info('   Loading Tied Encoder-Decoder Model')
+        logger.info('   Loading Tied Encoder-Decoder Model')
         config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
                                                     bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
@@ -1310,7 +1560,7 @@ def main():
         model.config.vocab_size = model.config.decoder.vocab_size
         embedding_size = model.get_input_embeddings().weight.shape[0]
     elif args.encoder_decoder_sep:
-        logging.info('   Loading Seperate Encoder-Decoder Model')
+        logger.info('   Loading Seperate Encoder-Decoder Model')
         #---------Encoder
         config_class_enc, model_class_enc, tokenizer_class_enc = MODEL_CLASSES[args.model_type_enc]
         #encoder tokenization...
@@ -1353,7 +1603,7 @@ def main():
                                                     latent_as_gpt_memory = latent_as_gpt_memory) #Decoder LM class
         model_dec.to(args.device) #transfers parameters of decoder to "cuda"
     else:
-        logging.info('   Loading Encoder-only or Decoder-only Model')
+        logger.info('   Loading Encoder-only or Decoder-only Model')
         config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
         tokenizer = tokenizer_class.from_pretrained(args.tokenizer_name if args.tokenizer_name else args.model_name_or_path, do_lower_case = args.do_lower_case,
                                                     bos_token = args.bos_token, eos_token = args.eos_token, pad_token = args.pad_token ) #Tokenization
@@ -1378,7 +1628,7 @@ def main():
         # embedding_size = model_dec.get_input_embeddings().weight.shape[0]
         # logging.info(f'  Embedding size: {embedding_size}')
         model = VAE(model_enc, model_dec, tokenizer_enc, tokenizer_dec, args) #Variational AutoEncoder (VAE) model loading
-        logging.info('   Finnished loading Variational model')
+        logger.info('   Finnished loading Variational model')
         #---- use random initialization weights
         if args.use_random_weight:
             model.apply(weights_init_rondom)
@@ -1392,7 +1642,7 @@ def main():
             param.requires_grad = False
         for n, p in model.named_parameters():
             if param.requires_grad:
-                logging.info(f'{n}, {p.data}')
+                logger.info(f'{n}, {p.data}')
     # Dataset
     class FailureAnalysisDataset(Dataset):
         def __init__(self, args, txt_list, tokenizer, max_length, wts = None, use_weights = False):
@@ -1520,12 +1770,12 @@ def main():
         if args.encoder_decoder_sep:
             #--add pretrained Encoder-Decoder to Variational form
             logger.info(f"   Loading VAE model w/ Encoder: {args.model_type_enc}, Decoder: {args.model_type_dec}")
-            global_step, tr_loss, optimizer = train(args, 
-                                                    train_dataset, 
-                                                    eval_dataset, 
-                                                    model, 
-                                                    tokenizer_enc = tokenizer_enc, 
-                                                    tokenizer_dec = tokenizer_dec) #train_dataloader ==> train-dataset
+            global_step, tr_loss = train(args, 
+                                          train_dataset, 
+                                          eval_dataset, 
+                                          model, 
+                                          tokenizer_enc = tokenizer_enc, 
+                                          tokenizer_dec = tokenizer_dec) #train_dataloader ==> train-dataset
             logger.info(f" Global step = {global_step}, Average loss = {tr_loss}")
         else:
             global_step, tr_loss = train(args, 
@@ -1543,13 +1793,7 @@ def main():
             tokenizer = tokenizer_class.from_pretrained(args.output_dir)
             model.to(args.device)
         else:
-            # Load a trained model and vocabulary that you have fine-tuned
-            model_enc = model_enc.from_pretrained(args.output_encoder_dir, latent_size = args.latent_size)
-            model_enc.to(args.device)
-    
-            # Load a trained model and vocabulary that you have fine-tuned
-            model_dec = model_dec.from_pretrained(args.output_decoder_dir, latent_size = args.latent_size)
-            model_dec.to(args.device)
+            load_checkpoint(args, MODEL_CLASSES, loading_step = None) # load model after training...
             
     # Evaluation - we can ask to evaluate all the checkpoints (sub-directories) in a directory
     if args.do_eval and args.local_rank in [-1, 0]:
@@ -1607,7 +1851,7 @@ def main():
         start_prompt = ii
         if not args.encoder_decoder_sep:
             # start_prompt = 'data castelletto customer manufacturing limit axis analysis failure complaint failed thd abnormal'
-            start_tokens = tokenizer(start_prompt, return_tensors="pt").input_ids.to(device)
+            start_tokens = tokenizer(start_prompt, return_tensors = "pt").input_ids.to(device)
             sampled_generated_outputs_token = model.generate(start_tokens, do_sample = True, top_k = 10, max_length = max_length, top_p = 0.95, 
                                                              temperature = 1.9, num_return_sequences = 1, pad_token_id = tokenizer.eos_token_id
                                                              )
@@ -1619,15 +1863,17 @@ def main():
             model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
         else:
             # start_prompt = 'data castelletto customer manufacturing limit axis analysis failure complaint failed thd abnormal'
-            start_tokens = tokenizer_dec(start_prompt, return_tensors="pt").input_ids.to(device)
-            sampled_generated_outputs_token = model_dec.generate(start_tokens, do_sample = True, top_k = 10, max_length = max_length, top_p = 0.95, 
-                                                             temperature = 1.9, num_return_sequences = 1, pad_token_id = tokenizer.eos_token_id
-                                                             )
-            generated_text_is = []
-            for _, s_output in enumerate(sampled_generated_outputs_token):
-                logger.info(f"AI generated FA: {tokenizer.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True)}")
-                generated_text_is.append(tokenizer_dec.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
-            prediction = " ".join(generated_text_is).lower()
+            # start_tokens = tokenizer_dec(start_prompt, return_tensors = "pt").input_ids.to(device)
+            # sampled_generated_outputs_token = model_dec.generate(start_tokens, do_sample = True, top_k = 10, max_length = max_length, top_p = 0.95, 
+            #                                                  temperature = 1.9, num_return_sequences = 1, pad_token_id = tokenizer.eos_token_id
+            #                                                  )
+            latent_z, _ = latent_code_from_text(start_prompt, tokenizer_enc, model, args)
+            prediction = latent_code_to_text(latent_z, tokenizer_dec, model, args)
+            # generated_text_is = []
+            # for _, s_output in enumerate(sampled_generated_outputs_token):
+            logger.info(f"AI generated FA: {prediction}")
+            #     generated_text_is.append(tokenizer_dec.decode(s_output[len(start_tokens[0]):], skip_special_tokens = True))
+            # prediction = " ".join(generated_text_is).lower()
             model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
         #--------------------
         #bleu score
