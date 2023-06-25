@@ -56,18 +56,18 @@ from torch.utils.tensorboard import SummaryWriter
 #from pytorchtools import EarlyStopping
 import torch.nn.init as init
 from torch.utils.data import Dataset, random_split
-from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
-                            AutoTokenizer, AutoModelForCausalLM, AutoConfig,
-                            GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
-                            BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
-                            RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, RobertaForMaskedLM, #Roberta Model #---
-                            XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
-                            XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
-                            TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
-                            OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
-                            BartTokenizer, BartForConditionalGeneration, BartConfig, #---
-                            T5Tokenizer, T5ForConditionalGeneration, T5Config,
-                            )
+# from transformers import (WEIGHTS_NAME, CONFIG_NAME, 
+#                             AutoTokenizer, AutoModelForCausalLM, AutoConfig,
+#                             GPT2Tokenizer, GPT2LMHeadModel, GPT2Config, GPT2Model, #GPT Model
+#                             BertTokenizer, EncoderDecoderModel, EncoderDecoderConfig, BertConfig, #Bert Model #---
+#                             RobertaTokenizer, RobertaForCausalLM, RobertaConfig, RobertaConfig, RobertaForMaskedLM, #Roberta Model #---
+#                             XLNetTokenizer, XLNetLMHeadModel, XLNetConfig, #XLNET Model
+#                             XLMTokenizer, XLMWithLMHeadModel, XLMConfig, #XLM Model
+#                             TransfoXLTokenizer, TransfoXLLMHeadModel, TransfoXLConfig, #TransfoXL Model
+#                             OpenAIGPTTokenizer, OpenAIGPTLMHeadModel, OpenAIGPTConfig, #OpenAIGPTT Model
+#                             BartTokenizer, BartForConditionalGeneration, BartConfig, #---
+#                             T5Tokenizer, T5ForConditionalGeneration, T5Config,
+#                             )
 from pytorch_transformers import (WEIGHTS_NAME, AdamW, WarmupLinearSchedule,
                                   BertConfig, BertForLatentConnector, BertTokenizer,
                                   GPT2Config, GPT2ForLatentConnector, GPT2Tokenizer,
@@ -384,17 +384,19 @@ def _rotate_checkpoints(args, checkpoint_prefix = 'checkpoint', use_mtime = Fals
 
 def filter_fdr_frm_generated_text(txt, stp_sstech):
     stp_sstech_join = ' '.join(stp_sstech).split(' ')
-    ai_br = txt.lower().split(' ')
+    ai_br = txt.split(' ') #original
+    ai_br_lwr = txt.lower().split(' ')
+    
     index_zer = len(stp_sstech[0].split(' ')) - 1  # the scaler -1 indicates count starting with zero
     ai_pair = []
     st_pair = []
-    len_ai_pair, len_stp_sstech_pair = len(ai_br), len(stp_sstech_join)
+    len_ai_pair, len_stp_sstech_pair = len(ai_br_lwr), len(stp_sstech_join)
     #N-grams in ai_br (i.e AI generated FAs)
     for i in range(len_ai_pair - index_zer):
         pair_ai = ''
         for j in range(index_zer + 1):
             if (i + j) < len_ai_pair:
-                pair_ai += ai_br[i + j] + ' '
+                pair_ai += ai_br_lwr[i + j] + ' '
         ai_pair.append(pair_ai.strip())
     # N-grams in stp_sstech_join (i.e ground truth FAs- from all possible 
     # combinations of Step-type + Substep technique)
@@ -413,6 +415,7 @@ def filter_fdr_frm_generated_text(txt, stp_sstech):
             break
     ai_pair_filt = ' '.join(ai_br[count:])
     return ai_pair_filt
+
 
 #%% clustering utils
 
@@ -1612,6 +1615,7 @@ def main():
     #--Evaluating Model performance
     if args.do_eval and args.local_rank in [-1, 0]:
         tokenizer_enc, model_enc, tokenizer_dec, model_dec, model = load_checkpoint(args, MODEL_CLASSES)
+        logger.info(f'   Loaded {args.vae_model_name} w/ {args.mmd_type} kernel')
         
     # Dataset
     class FailureAnalysisDataset(Dataset):
@@ -1849,7 +1853,8 @@ def main():
             # prediction = filter_fdr_frm_generated_text(prediction, stp_sstech) #filter out generated failure description
             # logger.info(f"AI generated FA: {prediction}")
             # model_generated_fas.append(prediction) #to be used for scoring ROUGE and BLEU
-            latent_code.append(latent_z.cpu().numpy() if len(latent_z.shape) == 2 else latent_z.cpu().squeeze(1).numpy())
+            latent_z = latent_z.cpu().numpy() if len(latent_z.shape) <= 2 else latent_z.cpu().squeeze(1).numpy()
+            latent_code.append(latent_z)
         #--------------------
         #bleu score
         chencherry = SmoothingFunction()
@@ -1903,12 +1908,23 @@ def main():
     output_eval_file = os.path.join(args.eval_dir, "eval_metric_results.txt")
     #---Saving latent code w/ GMM-clustering
     latent_code = np.array(latent_code)
+    latent_code = torch.Tensor(latent_code).squeeze(1).numpy()
     np.save(os.path.join(args.eval_dir, "latent_code.npy"), latent_code)
     logger.info('  Saving latent code')
     c_label, bic = GMMClustering(latent_code, nc_trials = 30)
     np.save(os.path.join(args.eval_dir, "latent_label.npy"), c_label)
     np.save(os.path.join(args.eval_dir, "latent_bic.npy"), bic)
     logger.info('  Saving latent code GMM clustering labels')
+    #--TSNE on Latent_code
+    # Perform t-SNE w/ GMM-clustering
+    tsne = TSNE(n_components = 2, random_state = 42)
+    latent_tsne = tsne.fit_transform(latent_code)
+    np.save(os.path.join(args.eval_dir, "latent_tsne.npy"), latent_tsne)
+    logger.info('  Saving latent code projection of TSNE')
+    c_label_tsne, bic_tsne = GMMClustering(latent_tsne, nc_trials = 30)
+    np.save(os.path.join(args.eval_dir, "latent_label_tsne.npy"), c_label_tsne)
+    np.save(os.path.join(args.eval_dir, "latent_bic_tsne.npy"), bic_tsne)
+    logger.info('  Saving TSNE latent code GMM clustering labels')
     #-- 
     with open(output_eval_file, "w+") as writer:
         logger.info("   ***** Storing complete evaluation results *****")
@@ -1926,16 +1942,7 @@ def main():
     #wipe model and trained parameters from memory
     if args.delete_model:
         os.system(f"rm -r {args.output_dir}")
-    #--TSNE on Latent_code
-    # Perform t-SNE w/ GMM-clustering
-    tsne = TSNE(n_components = 2, random_state = 42)
-    latent_tsne = tsne.fit_transform(latent_code)
-    np.save(os.path.join(args.eval_dir, "latent_tsne.npy"), latent_tsne)
-    logger.info('  Saving latent code projection of TSNE')
-    c_label_tsne, bic_tsne = GMMClustering(latent_tsne, nc_trials = 30)
-    np.save(os.path.join(args.eval_dir, "latent_label_tsne.npy"), c_label_tsne)
-    np.save(os.path.join(args.eval_dir, "latent_bic_tsne.npy"), bic_tsne)
-    logger.info('  Saving TSNE latent code GMM clustering labels')
+    
     
 if __name__ == "__main__":
     main()
